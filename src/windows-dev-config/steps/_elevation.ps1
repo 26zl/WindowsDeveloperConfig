@@ -73,8 +73,11 @@ function Get-DevConfigRelaunchArguments {
         [switch] $AllowUnsigned,
         [switch] $RequestElevation
     )
-    $executionPolicy = if ($AllowUnsigned) { 'Bypass' } else { 'AllSigned' }
-    $arguments = @('-NoProfile', '-ExecutionPolicy', $executionPolicy, '-File', "`"$ScriptPath`"")
+    $arguments = @('-NoProfile')
+    if (-not $AllowUnsigned) {
+        $arguments += '-ExecutionPolicy', 'AllSigned'
+    }
+    $arguments += '-File', "`"$ScriptPath`""
     if (-not $RequestElevation) {
         $arguments += '-NoElevate'
     }

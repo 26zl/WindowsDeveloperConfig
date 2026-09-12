@@ -28,14 +28,14 @@ It is **idempotent** — every change is checked before it's made, so re-running
 
 ## Quick start
 
-Open **any** PowerShell window — Windows PowerShell or PowerShell 7, elevated or not — and run:
+First [configure unsigned development](#running-it-other-ways), then run this in Windows PowerShell 5.1 or PowerShell 7. Elevation is optional:
 
 ```powershell
 $url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
 & ([scriptblock]::Create((irm $url))) -AllowUnsigned
 ```
 
-That's the whole thing. You'll get one UAC prompt before setup and another after the restart.
+You'll get one UAC prompt before setup and another after the restart.
 
 > `-AllowUnsigned` runs the source copy under `src/` instead of the signed copy at the repository root.
 
@@ -259,10 +259,19 @@ The transcript is more verbose than the console on purpose: it records handled e
 
 ## Running it other ways
 
+**Unsigned development.** On a test machine, record the setup user's current policy, then run these commands in both Windows PowerShell 5.1 and PowerShell 7:
+
+```powershell
+Get-ExecutionPolicy -List
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
+```
+
+`CurrentUser` affects all scripts for that user and survives reboot; `Process` does not. Restore the previous policy after testing. Group Policy takes precedence.
+
 **From a clone, using unsigned source:**
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\windows-dev-config\dev-config.ps1 -AllowUnsigned
+powershell.exe -NoProfile -File .\src\windows-dev-config\dev-config.ps1 -AllowUnsigned
 ```
 
 **Pin a tag, or try a branch.** `-Ref` takes a branch, tag, or commit SHA. Passing arguments needs the script-block form rather than `| iex`:
@@ -298,7 +307,7 @@ $url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/
 
 **Code signing.** The release pipeline publishes Microsoft Authenticode-signed `.ps1` files at the repository root. The bootstrap checks every `.ps1` for a `Valid` Microsoft Corporation signature before and after copying, even with `-NoLaunch`. Failure stops setup but leaves copied files in place. Unsigned `src/windows-dev-config/` requires `-AllowUnsigned`, which skips both checks. Verification does not prevent later file replacement in the writable install directory.
 
-**Execution policy.** Setup requires `AllSigned` by default; `-AllowUnsigned` uses process-scoped `Bypass`. The selected policy applies to elevation, PowerShell 7 relaunches, and reboot resume. Saved policies are unchanged. Group Policy takes precedence and may block unsigned scripts. `AllSigned` may prompt you to trust a publisher.
+**Execution policy.** Production launches use `AllSigned`, including elevation, PowerShell 7 relaunches, and reboot resume. `-AllowUnsigned` leaves execution policy to the environment. Setup never changes saved policies. Group Policy takes precedence and may block unsigned scripts. `AllSigned` may prompt you to trust a publisher.
 
 **What it does not do.** It doesn't collect or send telemetry, doesn't sign you in to anything, doesn't change credentials or Windows Defender settings, and doesn't touch files in your user profile beyond the PowerShell profile and Windows Terminal settings described above.
 

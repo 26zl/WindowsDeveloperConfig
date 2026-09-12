@@ -13,7 +13,7 @@
   By default, the files it installs must come from the signed release copy at the repository
   root, and every PowerShell file must have a valid Microsoft signature. Pass -AllowUnsigned
   to explicitly use the source copy under src/ without signature validation instead.
-  Launches use AllSigned by default, or process-scoped Bypass with -AllowUnsigned.
+  Launches use AllSigned by default; -AllowUnsigned leaves execution policy to the environment.
 
   To pick a branch or pin a tag, run it as a script block instead:
 
@@ -195,14 +195,13 @@ try {
     Write-Host "  Ready in $InstallRoot" -ForegroundColor DarkGray
 
     $shell = if (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-    $executionPolicy = if ($AllowUnsigned) { 'Bypass' } else { 'AllSigned' }
-    $arguments = @('-NoProfile', '-ExecutionPolicy', $executionPolicy, '-File', "`"$target`"")
-    if ($AllowUnsigned) {
-        $arguments += '-AllowUnsigned'
+    $arguments = @('-NoProfile')
+    if (-not $AllowUnsigned) {
+        $arguments += '-ExecutionPolicy', 'AllSigned'
     }
 
     if ($NoLaunch) {
-        $command = "& '$shell' -NoProfile -ExecutionPolicy $executionPolicy -File '$($target.Replace("'", "''"))'"
+        $command = "& '$shell' $($arguments -join ' ') -File '$($target.Replace("'", "''"))'"
         if ($AllowUnsigned) {
             $command += ' -AllowUnsigned'
         }
@@ -210,6 +209,11 @@ try {
         Write-Host "Run it when you're ready:" -ForegroundColor Cyan
         Write-Host "  $command" -ForegroundColor DarkGray
         return
+    }
+
+    $arguments += '-File', "`"$target`""
+    if ($AllowUnsigned) {
+        $arguments += '-AllowUnsigned'
     }
 
     $proc = Start-Process -FilePath $shell -ArgumentList $arguments -NoNewWindow -Wait -PassThru
