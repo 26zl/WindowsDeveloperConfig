@@ -104,9 +104,10 @@ function Assert-CalmOsMicrosoftSigned {
         [Parameter(Mandatory)] [string] $Directory
     )
 
-    $scripts = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -Filter '*.ps1')
+    $Directory = (Get-Item -LiteralPath $Directory -Force).FullName
+    $scripts = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -Filter '*.ps1' -Force)
     if ($scripts.Count -eq 0) {
-        throw "The signed Calm OS copy under windows-dev-config contains no PowerShell files."
+        throw "The Calm OS payload in '$Directory' contains no PowerShell files."
     }
 
     $failures = @()
@@ -131,7 +132,7 @@ function Assert-CalmOsMicrosoftSigned {
 
     if ($failures.Count -gt 0) {
         $details = ($failures | ForEach-Object { "    $_" }) -join [Environment]::NewLine
-        throw "The signed Calm OS payload failed Microsoft signature verification:$([Environment]::NewLine)$details$([Environment]::NewLine)Nothing was installed. Use -AllowUnsigned only when you intentionally want to run the source copy."
+        throw "The Calm OS payload in '$Directory' failed Microsoft signature verification:$([Environment]::NewLine)$details$([Environment]::NewLine)Setup was not started. Use -AllowUnsigned only when you intentionally want to run the source copy."
     }
 
     Write-Host "  Verified $($scripts.Count) Microsoft-signed PowerShell files." -ForegroundColor DarkGray
@@ -179,6 +180,10 @@ try {
     # Copied over the top so a run waiting on its reboot keeps its log and its tally.
     Copy-Item -LiteralPath (Join-Path $setupDir 'dev-config.ps1') -Destination $InstallRoot -Force
     Copy-Item -LiteralPath (Join-Path $setupDir 'steps') -Destination $InstallRoot -Recurse -Force
+
+    if (-not $AllowUnsigned) {
+        Assert-CalmOsMicrosoftSigned -Directory $InstallRoot
+    }
 
     # PowerShell refuses to load a file marked as downloaded, which is every file in this zip.
     Get-ChildItem -LiteralPath $InstallRoot -Recurse -Filter '*.ps1' -File | Unblock-File

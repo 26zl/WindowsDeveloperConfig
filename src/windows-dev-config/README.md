@@ -47,7 +47,7 @@ That's the whole thing. You'll get one UAC prompt before setup and another after
 1. Downloads the repository as a ZIP from `github.com/microsoft/WindowsDeveloperConfig`.
 2. Selects the setup: the signed repository-root `windows-dev-config/` folder, or `src/windows-dev-config/` with `-AllowUnsigned`.
 3. Verifies that every PowerShell file has a valid Microsoft Corporation Authenticode signature — skipped under `-AllowUnsigned`.
-4. Copies [`dev-config.ps1`](./dev-config.ps1) plus the [`steps/`](./steps) folder into `%LOCALAPPDATA%\CalmOS`, deletes its temporary download folder, and starts the setup from there.
+4. Copies [`dev-config.ps1`](./dev-config.ps1) and [`steps/`](./steps) to `%LOCALAPPDATA%\CalmOS`, rechecks signatures, removes temporary downloads, and starts setup.
 
 The setup is installed to disk rather than run from the pipe because it loads two dozen files from its own folder, relaunches itself elevated, and has to survive a reboot — none of which a piped-in string can do.
 
@@ -296,7 +296,7 @@ $url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/
 
 **What it downloads, and from where.** GitHub (this repository, the pinned Cascadia Code release, which is checked against a SHA-256, and the latest `microsoft/winget-cli` release), the PowerShell Gallery (the `Microsoft.WinGet.Client` module), the winget package sources, and the GitHub favicon used as the Copilot profile icon. Failing to fetch the icon is not treated as an error, and neither is failing to look up the latest winget version.
 
-**Code signing.** The release pipeline Authenticode-signs every `.ps1` in this repository with a Microsoft certificate and publishes the signed copies at the repository root. The bootstrap requires that signed copy by default and does not silently fall back to source. Before it copies or runs the payload, it requires every `.ps1` to have a `Valid` Authenticode signature whose signer is Microsoft Corporation; one missing, invalid, or unexpected signature stops the run. Running the unsigned `src/windows-dev-config/` payload skips these checks and requires the explicit `-AllowUnsigned` switch.
+**Code signing.** The release pipeline publishes Microsoft Authenticode-signed `.ps1` files at the repository root. The bootstrap checks every `.ps1` for a `Valid` Microsoft Corporation signature before and after copying, even with `-NoLaunch`. Failure stops setup but leaves copied files in place. Unsigned `src/windows-dev-config/` requires `-AllowUnsigned`, which skips both checks. Verification does not prevent later file replacement in the writable install directory.
 
 **Execution policy.** Setup requires `AllSigned` by default; `-AllowUnsigned` uses process-scoped `Bypass`. The selected policy applies to elevation, PowerShell 7 relaunches, and reboot resume. Saved policies are unchanged. Group Policy takes precedence and may block unsigned scripts. `AllSigned` may prompt you to trust a publisher.
 
