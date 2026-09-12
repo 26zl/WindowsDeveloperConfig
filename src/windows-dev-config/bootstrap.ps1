@@ -13,6 +13,7 @@
   By default, the files it installs must come from the signed release copy at the repository
   root, and every PowerShell file must have a valid Microsoft signature. Pass -AllowUnsigned
   to explicitly use the source copy under src/ without signature validation instead.
+  Launches use AllSigned by default, or process-scoped Bypass with -AllowUnsigned.
 
   To pick a branch or pin a tag, run it as a script block instead:
 
@@ -188,16 +189,24 @@ try {
     $target = Join-Path $InstallRoot 'dev-config.ps1'
     Write-Host "  Ready in $InstallRoot" -ForegroundColor DarkGray
 
+    $shell = if (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    $executionPolicy = if ($AllowUnsigned) { 'Bypass' } else { 'AllSigned' }
+    $arguments = @('-NoProfile', '-ExecutionPolicy', $executionPolicy, '-File', "`"$target`"")
+    if ($AllowUnsigned) {
+        $arguments += '-AllowUnsigned'
+    }
+
     if ($NoLaunch) {
+        $command = "& '$shell' -NoProfile -ExecutionPolicy $executionPolicy -File '$($target.Replace("'", "''"))'"
+        if ($AllowUnsigned) {
+            $command += ' -AllowUnsigned'
+        }
         Write-Host ''
         Write-Host "Run it when you're ready:" -ForegroundColor Cyan
-        Write-Host "  & '$target'" -ForegroundColor DarkGray
+        Write-Host "  $command" -ForegroundColor DarkGray
         return
     }
 
-    # The file on disk is subject to the execution policy even though this script wasn't.
-    $shell = if (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$target`"")
     $proc = Start-Process -FilePath $shell -ArgumentList $arguments -NoNewWindow -Wait -PassThru
 
     # No 'exit': this usually runs in the user's own console and would close their window.

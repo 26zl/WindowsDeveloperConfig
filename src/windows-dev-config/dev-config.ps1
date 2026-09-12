@@ -6,11 +6,16 @@
 [CmdletBinding()]
 param(
     [switch] $NoElevate,
-    [switch] $Resumed
+    [switch] $Resumed,
+    [switch] $AllowUnsigned
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if (-not $AllowUnsigned -and (Get-ExecutionPolicy) -ne 'AllSigned') {
+    throw 'Signed setup requires AllSigned. Launch PowerShell with -ExecutionPolicy AllSigned; Group Policy may override it. Use -AllowUnsigned only for development.'
+}
 
 # Windows PowerShell 5.1 defaults to ANSI; force UTF-8 for console symbols.
 try {
@@ -36,10 +41,10 @@ $stepsDir = Join-Path $PSScriptRoot 'steps'
 # TLS is configured before any download step runs.
 Enable-DevConfigModernTls
 
-Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed
+Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
 
 # WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
-Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed
+Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
 
 # The lock starts after relaunches so the worker process owns the log file.
 if (-not (Enter-DevConfigSingleInstance)) {
@@ -56,6 +61,7 @@ Start-DevConfigLog -Path (Join-Path $PSScriptRoot 'devconfig-log.txt') -Append:$
 Clear-DevConfigResume
 
 $Script:DevConfigResumed = [bool]$Resumed
+$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
 if ($Script:DevConfigResumed) {
     # Restore the pre-reboot tally so the final summary covers the whole run.
     Restore-DevConfigTally -Path (Join-Path $PSScriptRoot 'devconfig-tally.json')

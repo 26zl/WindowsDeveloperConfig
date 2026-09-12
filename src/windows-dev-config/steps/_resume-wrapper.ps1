@@ -4,7 +4,8 @@
 #>
 
 param(
-    [Parameter(Mandatory)] [string] $ScriptPath
+    [Parameter(Mandatory)] [string] $ScriptPath,
+    [switch] $AllowUnsigned
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +31,7 @@ Remove-Item $masterLog, $innerOut, $innerErr -ErrorAction SilentlyContinue
 
 $shell = Get-DevConfigTaskShellExe
 $proc = Start-Process -FilePath $shell `
-    -ArgumentList (Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed) `
+    -ArgumentList (Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed -AllowUnsigned:$AllowUnsigned) `
     -RedirectStandardOutput $innerOut -RedirectStandardError $innerErr -NoNewWindow -PassThru
 
 # Mirroring new lines keeps resumed output visible while preserving one combined log.
