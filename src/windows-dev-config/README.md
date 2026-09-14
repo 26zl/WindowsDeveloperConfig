@@ -97,7 +97,7 @@ Every one of these is listed in full detail in [What it changes](#what-it-change
 
 ## What it changes
 
-51 individual steps across 11 phases. Each one is checked first and skipped if the machine is already in that state.
+50 individual steps across 11 phases. Each one is checked first and skipped if the machine is already in that state.
 
 ### Packages
 
@@ -124,7 +124,7 @@ Installed with winget from the `winget` source, silently, with agreements accept
 A package counts as done only when winget reports it installed **and** current, so a re-run also picks up available updates.
 
 <details>
-<summary><strong>Windows settings — all 25 registry values</strong></summary>
+<summary><strong>Windows settings — all 24 registry values</strong></summary>
 
 **System** (`HKLM`, requires Administrator)
 
@@ -141,12 +141,11 @@ A package counts as done only when winget reports it installed **and** current, 
 | ------- | ---------- | ----- |
 | Show file extensions | `Advanced\HideFileExt` | `0` |
 | Show hidden files | `Advanced\Hidden` | `1` |
-| Full path in the title bar | `Advanced\FullPathAddress` | `1` |
+| Full path in the title bar | `CabinetState\FullPath` | `1` |
 | Open Explorer to This PC | `Advanced\LaunchTo` | `1` |
-| No frequent folders in Quick Access | `Advanced\ShowFrequent` | `0` |
+| No frequent folders in Quick Access | `ShowFrequent` | `0` |
 | No recent files in Quick Access | `ShowRecent` | `0` |
 | No recommended or cloud files | `ShowCloudFilesInQuickAccess` | `0` |
-| Git status columns in Explorer | `Advanced\NavPaneShowVersionControl` | `1` |
 | No sync-provider tips | `Advanced\ShowSyncProviderNotifications` | `0` |
 
 **Taskbar, Start, search and notifications**
@@ -155,7 +154,7 @@ A package counts as done only when winget reports it installed **and** current, 
 | ------- | --- | ----- |
 | Do Not Disturb (all toasts off) | `HKCU\...\Notifications\Settings\NOC_GLOBAL_SETTING_TOASTS_ENABLED` | `0` |
 | Hide the Bluetooth tray icon | `HKCU\Control Panel\Bluetooth\Notification Area Icon` | `0` |
-| "End Task" on taskbar right-click | `HKCU\...\Explorer\Advanced\TaskbarEndTask` | `1` |
+| "End Task" on taskbar right-click | `HKCU\...\Explorer\Advanced\TaskbarDeveloperSettings\TaskbarEndTask` | `1` |
 | No web results in search | `HKCU\SOFTWARE\Policies\Microsoft\Windows\Explorer\DisableSearchBoxSuggestions` | `1` |
 | No search highlights | `HKCU\...\SearchSettings\IsDynamicSearchBoxEnabled` | `0` |
 | No Start menu recommendations | `HKCU\...\Explorer\Advanced\Start_IrisRecommendations` | `0` |
@@ -228,7 +227,7 @@ Every step is a triple: a check, an apply, and the same check again.
 - If the apply runs but the check still fails afterwards, that's an error — not a silent success.
 - Steps that aren't worth stopping the whole run for are marked **best-effort**. If one of those fails it's reported as **flagged**, the run continues, and the summary names it at the end so it doesn't scroll past you.
 
-That's why the totals in the summary can add up to more than 51: the tally is saved across the reboot and carried into the resumed run, which re-checks every step it already did. Steps counted before the restart are counted again when they're confirmed after it.
+That's why the totals in the summary can add up to more than 50: the tally is saved across the reboot and carried into the resumed run, which re-checks every step it already did. Steps counted before the restart are counted again when they're confirmed after it.
 
 ### Elevation and PowerShell 7
 
