@@ -18,7 +18,6 @@ function Invoke-RegistryExplorerPhase {
         @{ Name = 'OpenThisPC';         KeyPath = $advanced; ValueName = 'LaunchTo';                      Value = 1; Description = 'Open File Explorer to This PC' }
         @{ Name = 'FrequentFolders';    KeyPath = $explorer; ValueName = 'ShowFrequent';                  Value = 0; Description = 'Disable frequent folders in Quick Access' }
         @{ Name = 'FrequentFiles';      KeyPath = $explorer; ValueName = 'ShowRecent';                    Value = 0; Description = 'Disable frequent files in Quick Access' }
-        @{ Name = 'RecommendedFiles';   KeyPath = $explorer; ValueName = 'ShowCloudFilesInQuickAccess';   Value = 0; Description = 'Disable recommended/cloud files in Quick Access' }
         @{ Name = 'TipsOff';            KeyPath = $advanced; ValueName = 'ShowSyncProviderNotifications'; Value = 0; Description = 'Disable sync provider notifications (tips)' }
     )
 

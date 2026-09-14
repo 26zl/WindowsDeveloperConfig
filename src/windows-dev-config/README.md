@@ -63,7 +63,7 @@ Roughly **30 minutes** on a clean machine with a good connection, most of it spe
 | - | ------------ | ---------------- |
 | 1 | The first UAC prompt appears | **Accept it.** Most of the settings are machine-wide and need Administrator. |
 | 2 | PowerShell 7 is installed if it isn't already, and the setup restarts itself on it | None |
-| 3 | Ten of the eleven phases run: packages, Windows settings, fonts, Terminal, prompt, Copilot | None. Long silent stretches during big downloads are normal — a "still working" note prints every minute |
+| 3 | Nine of the ten phases run: packages, Windows settings, fonts, Terminal, prompt, Copilot | None. Long silent stretches during big downloads are normal — a "still working" note prints every minute |
 | 4 | WSL is installed. The machine warns you and **restarts after 10 seconds** | **Save your work before you start.** |
 | 5 | You sign back in; a window opens and the second UAC prompt appears | **Accept it** to finish the run |
 | 6 | A summary prints: how many things changed, how many were already fine | Press a key to close, or leave it — it closes itself after 15 minutes |
@@ -86,9 +86,6 @@ This flow is opinionated, and a few of its choices are worth knowing about up fr
 
 | Change | Why it might matter to you |
 | ------ | -------------------------- |
-| **Remote Desktop is enabled** | `fDenyTSConnections` is set to `0`, which allows incoming RDP sessions. The Windows Firewall rule is *not* opened, so this alone doesn't expose the machine to your network — but it is a real change to the machine's posture. |
-| **Two Edge settings are applied as policy** | They're written under `HKLM\SOFTWARE\Policies\Microsoft\Edge`, so Edge will report "managed by your organization" and grey those two settings out in its UI. |
-| **All notifications are turned off** | Do Not Disturb is enabled globally, not just for a quiet-hours window. Teams, Outlook, and everything else stop raising toasts until you turn it back on. |
 | **Both Node.js LTS and nvm-windows are installed** | They are two different ways to manage Node. If you plan to use nvm, uninstall Node.js first so nvm owns the PATH entry. |
 | **Windows Terminal's `settings.json` is rewritten** | A `settings.json.bak` is written next to it first, but any comments in your settings file are lost, because the file is round-tripped through JSON. If the file can't be parsed, the Terminal change is flagged and skipped, the file is left untouched, and the remaining phases continue. |
 | **There's no uninstall** | Nothing that gets applied is reverted automatically. [Undoing it](#undoing-it) lists the manual reversals. |
@@ -97,7 +94,7 @@ Every one of these is listed in full detail in [What it changes](#what-it-change
 
 ## What it changes
 
-50 individual steps across 11 phases. Each one is checked first and skipped if the machine is already in that state.
+10 phases. Each step is checked first and skipped if the machine is already in that state.
 
 ### Packages
 
@@ -124,16 +121,13 @@ Installed with winget from the `winget` source, silently, with agreements accept
 A package counts as done only when winget reports it installed **and** current, so a re-run also picks up available updates.
 
 <details>
-<summary><strong>Windows settings — all 24 registry values</strong></summary>
+<summary><strong>Windows registry settings</strong></summary>
 
 **System** (`HKLM`, requires Administrator)
 
 | Setting | Key | Value |
 | ------- | --- | ----- |
-| Sudo, inline mode | `SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo\Enabled` | `3` |
-| Developer Mode | `SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\AllowDevelopmentWithoutDevLicense` | `1` |
 | Win32 long paths | `SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` | `1` |
-| Remote Desktop allowed | `SYSTEM\CurrentControlSet\Control\Terminal Server\fDenyTSConnections` | `0` |
 
 **File Explorer** (`HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer`)
 
@@ -145,30 +139,15 @@ A package counts as done only when winget reports it installed **and** current, 
 | Open Explorer to This PC | `Advanced\LaunchTo` | `1` |
 | No frequent folders in Quick Access | `ShowFrequent` | `0` |
 | No recent files in Quick Access | `ShowRecent` | `0` |
-| No recommended or cloud files | `ShowCloudFilesInQuickAccess` | `0` |
 | No sync-provider tips | `Advanced\ShowSyncProviderNotifications` | `0` |
 
-**Taskbar, Start, search and notifications**
+**Taskbar, Start and PowerToys notifications**
 
 | Setting | Key | Value |
 | ------- | --- | ----- |
-| Do Not Disturb (all toasts off) | `HKCU\...\Notifications\Settings\NOC_GLOBAL_SETTING_TOASTS_ENABLED` | `0` |
-| Hide the Bluetooth tray icon | `HKCU\Control Panel\Bluetooth\Notification Area Icon` | `0` |
 | "End Task" on taskbar right-click | `HKCU\...\Explorer\Advanced\TaskbarDeveloperSettings\TaskbarEndTask` | `1` |
-| No web results in search | `HKCU\SOFTWARE\Policies\Microsoft\Windows\Explorer\DisableSearchBoxSuggestions` | `1` |
-| No search highlights | `HKCU\...\SearchSettings\IsDynamicSearchBoxEnabled` | `0` |
 | No Start menu recommendations | `HKCU\...\Explorer\Advanced\Start_IrisRecommendations` | `0` |
-| Widgets off | `HKLM\SOFTWARE\Policies\Microsoft\Dsh\AllowNewsAndInterests` | `0` |
 | No PowerToys always-on-top toasts | `HKCU\...\Notifications\Settings\PowerToys\Enabled` | `0` |
-
-Widgets are turned off through the OS policy value because the per-user taskbar icon value no longer takes effect on Windows 11 24H2 and later.
-
-**Microsoft Edge** (`HKLM\SOFTWARE\Policies\Microsoft\Edge`)
-
-| Setting | Value name | Value |
-| ------- | ---------- | ----- |
-| Blank new tab page | `NewTabPageLocation` | `about:blank` |
-| Skip the first-run experience | `HideFirstRunExperience` | `1` |
 
 **Theme** (`HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize`)
 
@@ -190,7 +169,6 @@ Widgets are turned off through the OS policy value because the per-user taskbar 
 
 These are **best-effort**: they need the network and a PATH that has just been updated, so a failure is flagged in the summary rather than stopping the run.
 
-- The **WinUI templates** for `dotnet new` (`Microsoft.WindowsAppSDK.WinUI.CSharp.Templates`).
 - The **`microsoft/win-dev-skills`** marketplace and its **WinUI plugin**, registered with the GitHub Copilot CLI.
 
 ### WSL
@@ -209,15 +187,14 @@ Nothing *inside* the distro is configured by this flow. For that, see [WSL Comfo
 | - | ----- | ----- |
 | 1 | Getting ready | Confirms PowerShell 7, then updates winget to the latest public stable release |
 | 2 | Packages | The 15 packages above, plus the PowerToys notification setting |
-| 3 | System settings | Sudo, Developer Mode, long paths, Remote Desktop |
+| 3 | System settings | Long paths |
 | 4 | File Explorer tweaks | |
-| 5 | Taskbar, search & start tweaks | |
-| 6 | Microsoft Edge tweaks | |
-| 7 | Fonts | |
-| 8 | Windows Terminal | |
-| 9 | PowerShell profile | |
-| 10 | GitHub Copilot | The Terminal profile, WinUI templates, and the Copilot CLI plugin — all best-effort |
-| 11 | WSL + Ubuntu | Last on purpose, so its restart happens after everything else is done |
+| 5 | Taskbar & Start tweaks | |
+| 6 | Fonts | |
+| 7 | Windows Terminal | |
+| 8 | PowerShell profile | |
+| 9 | GitHub Copilot | The Terminal profile and the Copilot CLI plugin — all best-effort |
+| 10 | WSL + Ubuntu | Last on purpose, so its restart happens after everything else is done |
 
 ### Check, apply, verify
 
@@ -227,7 +204,7 @@ Every step is a triple: a check, an apply, and the same check again.
 - If the apply runs but the check still fails afterwards, that's an error — not a silent success.
 - Steps that aren't worth stopping the whole run for are marked **best-effort**. If one of those fails it's reported as **flagged**, the run continues, and the summary names it at the end so it doesn't scroll past you.
 
-That's why the totals in the summary can add up to more than 50: the tally is saved across the reboot and carried into the resumed run, which re-checks every step it already did. Steps counted before the restart are counted again when they're confirmed after it.
+The tally is saved across the reboot and carried into the resumed run, which re-checks every step it already did. Steps counted before the restart are counted again when they're confirmed after it.
 
 ### Elevation and PowerShell 7
 
@@ -331,7 +308,7 @@ Exactly what it says — switch to the other window. Two copies would fight over
 
 Flagged means best-effort work that couldn't be completed or confirmed. The run finishes and names them in the summary. Everything else was applied.
 
-The most common cause is a step that needs a package that hasn't finished registering yet — the WinUI templates need the .NET SDK on `PATH`, and the Copilot plugin steps need the GitHub Copilot CLI. **Run the command again**: the steps that already succeeded are skipped in seconds and only the flagged ones are retried.
+The most common cause is a step that needs a package that hasn't finished registering yet — the Copilot plugin steps need the GitHub Copilot CLI on `PATH`. **Run the command again**: the steps that already succeeded are skipped in seconds and only the flagged ones are retried.
 
 </details>
 
@@ -415,18 +392,6 @@ Then please [open an issue](https://github.com/microsoft/WindowsDeveloperConfig/
 There is no automatic undo, and the setup never removes anything on its own. The reversals below are the ones most people ask about. Registry changes under `HKLM` need an elevated prompt.
 
 ```powershell
-# Remote Desktop off again
-Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyTSConnections 1
-
-# Drop the two Edge policies (removes "managed by your organization" for them)
-Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' NewTabPageLocation, HideFirstRunExperience
-
-# Notifications back on
-Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' NOC_GLOBAL_SETTING_TOASTS_ENABLED 1
-
-# Widgets back on
-Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' AllowNewsAndInterests
-
 # Back to light mode
 Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' AppsUseLightTheme 1
 Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' SystemUsesLightTheme 1
@@ -435,7 +400,7 @@ Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Persona
 Everything else:
 
 - **Packages:** `winget uninstall --id <id>` using the ids in [Packages](#packages).
-- **Explorer, Start and search settings:** all of them are also in Settings and Explorer's Options dialog. Sign out and back in for them to take effect.
+- **Explorer and Start settings:** all of them are also in Settings and Explorer's Options dialog. Sign out and back in for them to take effect.
 - **Windows Terminal:** restore the `settings.json.bak` written next to `settings.json`.
 - **The Copilot Terminal profile:** delete `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\DevConfig`.
 - **The Oh My Posh prompt:** remove the `oh-my-posh init` block from your PowerShell 7 `$PROFILE`.
@@ -450,8 +415,6 @@ Edit the files under `src\windows-dev-config` in your clone, then run the [unsig
 | ----- | ---- |
 | Add or remove a package | The `$packages` list in [`steps/packages.ps1`](./steps/packages.ps1) |
 | Change or drop a Windows setting | The `$tweaks` list in the matching `steps/registry-*.ps1` |
-| Skip the Edge policies entirely | Remove `edge.ps1` from the `$phases` list in [`dev-config.ps1`](./dev-config.ps1) |
-| Keep Remote Desktop off | Delete the `RemoteDesktop` entry in [`steps/registry-system.ps1`](./steps/registry-system.ps1) |
 | Change the terminal font | `$Script:CascadiaDefaultFontFace` in [`steps/fonts.ps1`](./steps/fonts.ps1) |
 | Install a different distro | The `wsl --install -d Ubuntu` arguments in [`steps/wsl.ps1`](./steps/wsl.ps1) |
 | Add something new | Copy the shape of any phase file: build steps with `New-DevConfigStep` and pass them to `Invoke-DevConfigSteps` |

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  System-level developer settings: Sudo, Developer Mode, long path support, Remote Desktop.
+  System-level developer settings: long path support.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -8,10 +8,7 @@ Set-StrictMode -Version Latest
 
 function Invoke-RegistrySystemPhase {
     $tweaks = @(
-        @{ Name = 'Sudo';          KeyPath = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo';           ValueName = 'Enabled';                        Value = 3; Description = 'Enable Sudo in inline mode' }
-        @{ Name = 'DeveloperMode'; KeyPath = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'; ValueName = 'AllowDevelopmentWithoutDevLicense'; Value = 1; Description = 'Enable Developer Mode (sideload + dev features)' }
         @{ Name = 'LongPaths';     KeyPath = 'HKLM\SYSTEM\CurrentControlSet\Control\FileSystem';              ValueName = 'LongPathsEnabled';               Value = 1; Description = 'Enable Win32 long path support' }
-        @{ Name = 'RemoteDesktop'; KeyPath = 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server';         ValueName = 'fDenyTSConnections';             Value = 0; Description = 'Enable Remote Desktop (firewall rule still needs separate enable)' }
     )
 
     # ArgumentList binds each tweak's values at call time instead of closure capture.

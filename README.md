@@ -77,7 +77,7 @@ You'll get one UAC prompt. Expect about 30 minutes on a clean machine.
 
 - **Dev tools:** Windows Terminal, PowerShell 7, Git, GitHub CLI, GitHub Copilot CLI, VS Code, .NET SDK 10, Python 3.14 + uv, Node.js LTS + nvm, Coreutils for Windows, Windows App CLI, Oh My Posh, and PowerToys.
 - **Terminal:** PowerShell 7 as the default profile, Oh My Posh in your prompt, Cascadia Mono NF as the default font, and a GitHub Copilot profile in the dropdown.
-- **Windows settings:** Dark theme, Developer Mode, Sudo, long paths, File Explorer defaults, Start/Search cleanup, Do Not Disturb, widgets off, and Edge policies.
+- **Windows settings:** Dark theme, long paths, File Explorer defaults, taskbar End Task, and fewer Start menu recommendations.
 - **WSL:** WSL platform + Ubuntu, including the restart and the automatic resume afterwards.
 
 </details>

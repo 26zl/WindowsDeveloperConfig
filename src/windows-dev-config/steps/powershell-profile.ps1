@@ -10,7 +10,22 @@ Set-StrictMode -Version Latest
 $Script:OhMyPoshInitLineRegex = 'oh-my-posh(?:\.exe)?\s+init'
 
 $Script:OhMyPoshInitCommand = @'
-$(if (Get-Command 'oh-my-posh' -ErrorAction SilentlyContinue) { 
+$usePosh = [bool]$env:WT_SESSION
+ 
+if (-not $usePosh) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        $usePosh = -not $principal.IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+        )
+    }
+    finally {
+        $identity.Dispose()
+    }
+}
+
+$(if ($usePosh -and (Get-Command 'oh-my-posh' -ErrorAction SilentlyContinue)) {
   oh-my-posh init pwsh
   # Set output encoding to UTF-8
   [Console]::OutputEncoding =[System.Text.Encoding]::UTF8
