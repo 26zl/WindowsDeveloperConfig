@@ -12,6 +12,7 @@ function Invoke-RegistryTaskbarSearchPhase {
     $tweaks = @(
         @{ Name = 'EndTask';                KeyPath = "$advanced\TaskbarDeveloperSettings";                                   ValueName = 'TaskbarEndTask';                      Value = 1; Description = 'Enable "End Task" on right-click of taskbar icons' }
         @{ Name = 'StartRecommendations';   KeyPath = $advanced;                                                              ValueName = 'Start_IrisRecommendations';           Value = 0; Description = 'Disable Start menu recommendations' }
+        @{ Name = 'StartAccountNotifications'; KeyPath = $advanced;                                                           ValueName = 'Start_AccountNotifications';          Value = 0; Description = 'Disable Start menu account notifications' }
     )
 
     # ArgumentList binds each tweak's values at call time instead of closure capture.

@@ -140,6 +140,7 @@ A package counts as done only when winget reports it installed **and** current, 
 | No frequent folders in Quick Access | `ShowFrequent` | `0` |
 | No recent files in Quick Access | `ShowRecent` | `0` |
 | No sync-provider tips | `Advanced\ShowSyncProviderNotifications` | `0` |
+| Details pane state | `Modules\GlobalSettings\DetailsContainer\DetailsContainer` | Binary `01 00 00 00 02 00 00 00` |
 
 **Taskbar, Start and PowerToys notifications**
 
@@ -147,6 +148,7 @@ A package counts as done only when winget reports it installed **and** current, 
 | ------- | --- | ----- |
 | "End Task" on taskbar right-click | `HKCU\...\Explorer\Advanced\TaskbarDeveloperSettings\TaskbarEndTask` | `1` |
 | No Start menu recommendations | `HKCU\...\Explorer\Advanced\Start_IrisRecommendations` | `0` |
+| No Start menu account notifications | `HKCU\...\Explorer\Advanced\Start_AccountNotifications` | `0` |
 | No PowerToys always-on-top toasts | `HKCU\...\Notifications\Settings\PowerToys\Enabled` | `0` |
 
 **Theme** (`HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize`)
