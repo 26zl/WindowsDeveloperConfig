@@ -1,0 +1,21 @@
+--- dev-config.winget	2026-09-07 19:59:05.404043100 +0200
++++ dev-config-nordp.winget	2026-09-07 19:59:05.402494700 +0200
+@@ -502,18 +502,6 @@
+     description: Enable Win32 long path support
+     securityContext: elevated
+ 
+-# Remote Desktop (replaces Microsoft.Windows.Developer/EnableRemoteDesktop)
+-- type: Microsoft.Windows/Registry
+-  name: RemoteDesktop
+-  properties:
+-    keyPath: HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server
+-    valueName: fDenyTSConnections
+-    valueData:
+-      DWord: 0
+-  metadata:
+-    description: Enable Remote Desktop (firewall rule still needs separate enable)
+-    securityContext: elevated
+-
+ # =============================================================================
+ # File Explorer and Desktop
+ # =============================================================================

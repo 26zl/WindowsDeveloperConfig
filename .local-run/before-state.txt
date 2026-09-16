@@ -1,0 +1,23 @@
+﻿UNSET    HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo\Enabled
+SET      HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\AllowDevelopmentWithoutDevLicense = 1
+SET      HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\HideFileExt = 0
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Hidden = 1
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\FullPathAddress
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\LaunchTo = 1
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\ShowFrequent
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShowRecent = 0
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShowCloudFilesInQuickAccess = 0
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\NavPaneShowVersionControl
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\ShowSyncProviderNotifications = 0
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\NOC_GLOBAL_SETTING_TOASTS_ENABLED
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDa = 0
+UNSET    HKCU:\Control Panel\Bluetooth\Notification Area Icon
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarEndTask
+SET      HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer\DisableSearchBoxSuggestions = 1
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\SearchSettings\IsDynamicSearchBoxEnabled = 0
+SET      HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Start_IrisRecommendations = 0
+SET      HKLM:\SOFTWARE\Policies\Microsoft\Dsh\AllowNewsAndInterests = 0
+UNSET    HKLM:\SOFTWARE\Policies\Microsoft\Edge\NewTabPageLocation
+SET      HKLM:\SOFTWARE\Policies\Microsoft\Edge\HideFirstRunExperience = 1
+UNSET    HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\PowerToys\Enabled
