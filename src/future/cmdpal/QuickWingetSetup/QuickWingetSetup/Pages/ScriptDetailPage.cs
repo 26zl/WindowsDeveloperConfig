@@ -122,7 +122,7 @@ internal sealed partial class ScriptDetailPage : ListPage
 
 internal sealed partial class RunWinGetCommand : InvokableCommand, IConfirmationArgs
 {
-    private const string FixItRelativePath = "scripts/windows/_common/enable-winget-configure.ps1";
+    private const string FixItRelativePath = "Workloads/_common/enable-winget-configure.ps1";
 
     private readonly string _scriptPath;
     private readonly ScriptFetchService _fetchService;

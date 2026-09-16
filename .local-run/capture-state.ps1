@@ -4,7 +4,7 @@ $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
 $backup  = Join-Path $scratch "backup-$stamp"
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
 
-# Registry values the configuration will set (RemoteDesktop already removed)
+# Registry values set by dev-config-nordp.winget and by upstream's PowerShell flow, plus fDenyTSConnections as a guard.
 $targets = @(
   @{k='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo';                            v='Enabled'}
   @{k='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock';                  v='AllowDevelopmentWithoutDevLicense'}
@@ -29,6 +29,13 @@ $targets = @(
   @{k='HKLM:\SOFTWARE\Policies\Microsoft\Edge';                                          v='NewTabPageLocation'}
   @{k='HKLM:\SOFTWARE\Policies\Microsoft\Edge';                                          v='HideFirstRunExperience'}
   @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\PowerToys'; v='Enabled'}
+  @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize';               v='AppsUseLightTheme'}
+  @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize';               v='SystemUsesLightTheme'}
+  @{k='HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server';                           v='fDenyTSConnections'}
+  # Locations used only by upstream's PowerShell flow (steps\registry-*.ps1, steps\packages.ps1)
+  @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\CabinetState';            v='FullPath'}
+  @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings'; v='TaskbarEndTask'}
+  @{k='HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Microsoft.PowerToysWin32'; v='Enabled'}
 )
 
 $revert = @("# Revert script generated $stamp",

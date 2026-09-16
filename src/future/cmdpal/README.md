@@ -52,29 +52,29 @@ independently. (Future: we may chain installs in the same Terminal tab.)
 ## Configuration
 
 The extension keeps an optional config at
-`%LocalAppData%\QuickWingetSetup\config.json`. Defaults are sane for a local
-clone of this repo:
+`%LocalAppData%\QuickWingetSetup\config.json`. The defaults fetch this repo's
+`main` branch from `raw.githubusercontent.com`, so no clone is required:
 
 ```jsonc
 {
   // "local" reads from disk, "github" fetches via raw.githubusercontent.com.
-  "source": "local",
-  "localPath": "C:\\Users\\crutkas\\WindowsDevSetupScripts",
-  "githubRepo": "crutkas/WindowsDevSetupScripts",
-  "githubBranch": "master",
-  "manifestFile": "manifest.yml",
+  "source": "github",
+  "localPath": "",
+  "githubRepo": "microsoft/WindowsDeveloperConfig",
+  "githubBranch": "main",
+  "manifestFile": "src/manifest.yml",
   "cacheTTLDays": 7
 }
 ```
 
-While `WindowsDevSetupScripts` is private, keep `source: "local"`. Once the
-repo is public, switch to `"github"` to pull straight from
-`raw.githubusercontent.com` with no clone required.
+To run against a clone, set `source` to `"local"` and `localPath` to the
+repository root. Flow paths in the manifest (`Workloads/<id>/...`) resolve
+against that root, so the signed top-level copies are what get launched.
 
 ## Building
 
 ```powershell
-cd cmdpal/QuickWingetSetup
+cd src/future/cmdpal/QuickWingetSetup
 dotnet restore .\QuickWingetSetup\QuickWingetSetup.csproj -r win-x64
 dotnet build   .\QuickWingetSetup\QuickWingetSetup.csproj -c Debug -r win-x64
 ```
@@ -96,8 +96,7 @@ The project targets `net9.0-windows10.0.26100.0` and is AOT/trim friendly.
 | `icon`, `name`, `description`, ...  | Rendered on the list/detail pages                           |
 
 If `windows.configuration` is omitted in `manifest.yml`, the extension falls
-back to `<dir of windows.install>/configuration.winget` — i.e. the
-WindowsDevSetupScripts convention.
+back to `<dir of windows.install>/configuration.winget`.
 
 > **Known gap.** Two flows are PowerShell-native and have no configuration
 > file at all: Calm OS (`calm-os`) and Comfort Shell (`comfort-shell`). The

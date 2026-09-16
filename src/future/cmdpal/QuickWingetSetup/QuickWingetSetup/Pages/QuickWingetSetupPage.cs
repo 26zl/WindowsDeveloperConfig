@@ -135,7 +135,7 @@ internal sealed partial class QuickWingetSetupPage : ListPage
 /// </summary>
 internal sealed partial class EnableWingetConfigureCommand : InvokableCommand
 {
-    private const string FixItRelativePath = "scripts/windows/_common/enable-winget-configure.ps1";
+    private const string FixItRelativePath = "Workloads/_common/enable-winget-configure.ps1";
 
     private readonly ScriptFetchService _fetchService;
     private readonly QuickWingetSetupPage _page;

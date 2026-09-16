@@ -1,23 +1,15 @@
 # Local changes
 
-This is a vendored copy of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-cloned at upstream commit `b5561d1`. Everything is upstream and unmodified **except** the
-files described below (`dev-config-nordp.winget`, two `configuration-local.winget` copies) and the
-review fixes listed at the end.
+This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
+kept in sync with upstream `main` (last merged: `ff7a538`, 2026-09-17). Everything is upstream and
+unmodified **except** the files described below and the review fixes listed at the end.
 
-## `windows-dev-config/dev-config-nordp.winget`
+## Windows Dev Config without Remote Desktop
 
-A copy of upstream `dev-config.winget` with the `RemoteDesktop` resource removed
-(12 lines; see `.local-run/remove-remotedesktop.patch`). The original
-`dev-config.winget` is left untouched alongside it for reference and diffing.
-
-### Why
-
-The upstream resource sets `fDenyTSConnections = 0`, and its description reads
-*"Enable Remote Desktop (firewall rule still needs separate enable)"*. That assumption does
-not hold on this machine: the **Remote Desktop firewall rule is already enabled**, so
-applying the resource takes the box from "RDP blocked" straight to "RDP listening and
-reachable" in a single step — with no second gate.
+Upstream's Windows Dev Config enables Remote Desktop by setting `fDenyTSConnections = 0`, with the
+note *"firewall rule still needs separate enable"*. That assumption does not hold on this machine:
+the **Remote Desktop firewall rule is already enabled**, so applying it takes the box from
+"RDP blocked" straight to "RDP listening and reachable" in a single step, with no second gate.
 
 Verify the current state with:
 
@@ -27,40 +19,75 @@ Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name 
 Get-NetFirewallRule -DisplayGroup 'Remote Desktop' | Select-Object Name, Enabled
 ```
 
-### Applying
+Upstream has shipped two generations of the flow. Both stay usable here without the RemoteDesktop
+step.
 
-Run from an **elevated** PowerShell 7:
+### PowerShell flow (current upstream): `.local-run/apply-ps-flow.ps1`
+
+Upstream replaced the DSC document with `windows-dev-config/bootstrap.ps1`, `dev-config.ps1` and
+`steps/*.ps1` in `ff7a538` (2026-09-16). The signed copy at the repo root only runs under the
+`AllSigned` execution policy, so a modified copy has to be the unsigned one under `src/` run with
+`-AllowUnsigned`, which is exactly how upstream's README says to customize it.
+
+`apply-ps-flow.ps1` does that without touching the checkout:
+
+1. Copies `src\windows-dev-config\dev-config.ps1` and `steps\` to `%LOCALAPPDATA%\CalmOS-nordp`,
+   a location that survives the reboot the flow may need.
+2. Deletes the `RemoteDesktop` entry from the staged `steps\registry-system.ps1`. It fails if it
+   finds anything other than exactly one such entry, or if `fDenyTSConnections` is still referenced
+   anywhere under `steps\`.
+3. Runs `pwsh -NoProfile -File <staged>\dev-config.ps1 -AllowUnsigned`. The flow requests UAC by
+   itself. `-NoLaunch` stages and prints the command instead of running it.
+
+```powershell
+.\.local-run\apply-ps-flow.ps1            # stage + run
+.\.local-run\apply-ps-flow.ps1 -NoLaunch  # stage only
+```
+
+Not run on this machine yet. Compared with the DSC run of 2026-09-07, this flow also:
+
+- updates winget to the latest GitHub release through `Repair-WinGetPackageManager` and installs
+  the `Microsoft.WinGet.Client` module for the current user;
+- counts a package as done only when it is installed **and** current, so it upgrades all 15
+  packages;
+- installs the Cascadia NF fonts machine-wide under `%SystemRoot%\Fonts` and removes the per-user
+  copies the DSC run installed;
+- round-trips Windows Terminal `settings.json` through `ConvertTo-Json` (backup in
+  `settings.json.bak`, comments are lost);
+- uses new registry locations for three values: `Explorer\CabinetState\FullPath`,
+  `Explorer\Advanced\TaskbarDeveloperSettings\TaskbarEndTask` and
+  `Notifications\Settings\Microsoft.PowerToysWin32\Enabled`;
+- keeps Sudo in inline mode, Do Not Disturb and the two Edge policies from the DSC version.
+
+WSL: `vmcompute` is registered, `wsl --version` works and Ubuntu is registered, so both WSL steps
+report "already OK" and no reboot is expected. If a reboot did happen, the resume task would fall
+back to Windows PowerShell 5.1, because PowerShell 7 here is the Store build and
+`C:\Program Files\PowerShell\7\pwsh.exe` does not exist.
+
+Run `.\.local-run\capture-state.ps1` first for a fresh revert point. It covers the new registry
+locations.
+
+### DSC snapshot (previous upstream): `windows-dev-config/dev-config-nordp.winget`
+
+A copy of upstream `dev-config.winget` as of `b5561d1` with the `RemoteDesktop` resource removed
+(12 lines; see `.local-run/remove-remotedesktop.patch`). Upstream deleted `dev-config.winget` and
+`install.ps1` in `ff7a538`, so this is a frozen snapshot. The original is available with
+`git show b5561d1:windows-dev-config/dev-config.winget`. The patch was cut with plain `diff -u`, so
+it applies to a fresh copy of that file with `git apply -p0 --ignore-whitespace`.
+
+Applied on 2026-09-07 (50/50 units, exit 0). To apply again, run from an **elevated**
+PowerShell 7:
 
 ```powershell
 .\.local-run\apply.ps1
 ```
 
-The script resolves its own paths, refuses to run unelevated, and writes a timestamped log
-next to itself. Or invoke winget directly:
+The script resolves its own paths, refuses to run unelevated, and writes a timestamped log next
+to itself. Or invoke winget directly:
 
 ```powershell
 winget configure --file .\windows-dev-config\dev-config-nordp.winget `
   --accept-configuration-agreements --disable-interactivity
-```
-
-### Upstream status
-
-`dev-config-nordp.winget` is a snapshot of `b5561d1`, not a live overlay. Upstream removed
-`dev-config.winget` and `install.ps1` in `ff7a538` (2026-09-16) and replaced them with a
-PowerShell flow: `windows-dev-config/bootstrap.ps1`, `dev-config.ps1` and `steps/*.ps1`. No newer
-upstream `dev-config.winget` will appear to regenerate this copy from.
-
-The replacement flow still enables Remote Desktop: `steps/registry-system.ps1` carries a
-`RemoteDesktop` entry that sets `fDenyTSConnections = 0`. Delete that entry before running it on
-this machine; upstream's `windows-dev-config/README.md` documents the same customization.
-
-`.local-run/remove-remotedesktop.patch` records the change against `b5561d1`. It was cut with plain
-`diff -u`, so `git apply` needs `-p0` and a fresh copy of the upstream file. From the repo root:
-
-```powershell
-Copy-Item .\windows-dev-config\dev-config.winget .\windows-dev-config\dev-config-nordp.winget -Force
-git apply -p0 --ignore-whitespace --directory=windows-dev-config .\.local-run\remove-remotedesktop.patch
-Select-String -Path .\windows-dev-config\dev-config-nordp.winget -Pattern 'fDenyTSConnections'   # must return nothing
 ```
 
 ## Workloads (applied 2026-09-14)
@@ -95,7 +122,8 @@ as it is.
 
 - every comment would be lost;
 - the block-comment regex `/\*[\s\S]*?\*/` also matches between glob keys such as
-  `"**/.venv/**"` and the next `"**/`, swallowing real settings;
+  `"**/.venv/**"` and the next `"**/`, swallowing real settings (fixed in `src/`, see below, but
+  the round-trip through `ConvertTo-Json` remains);
 - the unit writes an absolute `C:\Users\...` path, which the machine-path guard in
   `vscode_config/test.sh` rejects.
 
@@ -117,42 +145,41 @@ after its OS check, with or without winget. Logs are in
 
 Once a newer bootstrapper ships, apply upstream `Workloads\sql\configuration.winget` as-is.
 
-## No reboot on this machine
+## WSL steps on this machine
 
-Two upstream resources look alarming but are self-skipping here:
+Both generations of the flow gate their WSL work on the same signals, and both are satisfied here:
 
-| Resource | Gate | Why it skips |
-| --- | --- | --- |
-| `RebootForVmp` | `testScript` returns true if the `vmcompute` service exists | WSL2 is already active, so the service is registered — **no reboot is triggered** |
-| `InstallUbuntu` | `testScript` returns true if any WSL distro is installed | Debian, RHEL-10 and docker-desktop are present — Ubuntu is not installed and the default distro is not changed |
+| Signal | DSC snapshot | PowerShell flow | State here |
+| --- | --- | --- | --- |
+| `vmcompute` service registered | `RebootForVmp` skips, no reboot | `WslComponents` already OK | Registered (WSL2 active) |
+| Distro registered | `InstallUbuntu` skips if any distro exists | `WslUbuntu` skips only if an `Ubuntu*` distro exists | Debian, Ubuntu, RHEL-10, docker-desktop |
 
 Re-check both before applying on a *different* machine, where they would fire and the run
 **would** reboot.
 
 ## `.local-run/`
 
-Artifacts from the 2026-09-07 run — not part of upstream, safe to delete.
+Local tooling and the artifacts of the 2026-09-07 run. Not part of upstream, safe to delete.
 
 | File | What it is |
 | --- | --- |
-| `apply.ps1` | Elevated apply wrapper, location-independent |
-| `capture-state.ps1` | Records current registry state and regenerates `revert-registry.ps1` |
-| `revert-registry.ps1` | Restores the 23 registry values to their pre-run state |
+| `apply.ps1` | Elevated apply wrapper for the DSC snapshot, location-independent |
+| `apply-ps-flow.ps1` | Stages and runs upstream's PowerShell flow without the RemoteDesktop step |
+| `capture-state.ps1` | Records the current registry state and regenerates `revert-registry.ps1` for both flows |
+| `revert-registry.ps1` | Restores the 23 registry values to their pre-run state of 2026-09-07 |
 | `before-state.txt` | What those values were before the run |
 | `terminal-settings.json` | Windows Terminal settings.json as it was before the run |
 | `apply.log` | Full log of the run (50/50 units applied, exit 0). Untracked: `.gitignore` ignores `*.log` |
 | `remove-remotedesktop.patch` | The diff documented above |
 
-Re-run `capture-state.ps1` before any future apply to refresh the revert point — it writes a
-fresh timestamped backup directory rather than overwriting this one.
-
-`capture-state.ps1` does not record the two `Themes\Personalize` values (`AppsUseLightTheme`,
-`SystemUsesLightTheme`) that the `darkTheme` unit sets. Add them to `$targets` before the next run
-if the theme should be part of the revert point.
+Re-run `capture-state.ps1` before any future apply to refresh the revert point. It writes a
+fresh timestamped backup directory rather than overwriting the committed one. The committed
+revert point predates the theme values, `fDenyTSConnections` and the PowerShell flow's registry
+locations, which `capture-state.ps1` records now.
 
 ## Review fixes on top of upstream (2026-09-17)
 
-These edits touch upstream files. None of them are in `ff7a538`, so they are candidates for
+These edits touch upstream files. None of them are in upstream `main`, so they are candidates for
 upstream pull requests.
 
 | File | Change |
@@ -164,3 +191,5 @@ upstream pull requests.
 | `.github/dependabot.yml` | Added a `nuget` entry for the Command Palette project so its packages get vulnerability and version updates. |
 | `.gitattributes` | `*.sh` is checked out with LF. Windows checkouts previously produced CRLF bash scripts. |
 | `src/tests/wsl-comfort-shell/` | Deleted. Nothing referenced it after the flow was renamed to `comfort-shell` (`src/tests/comfort-shell/`). |
+| `src/wsl-comfort/install.ps1`, `readme.md` | The closing message names the profile the script actually creates (`Comfort Shell - <distro>`), and the readme names the real function (`Get-InstalledWslDistros`). |
+| `src/future/cmdpal/` | `ExtensionConfig` defaults point at `microsoft/WindowsDeveloperConfig` `main` and `src/manifest.yml` instead of a private personal clone path. The fix-it script path is `Workloads/_common/enable-winget-configure.ps1`; the `scripts/windows/` layout no longer exists. README config example and build path updated. Still open: the DSC summary parser understands only the v0.2 `- resource:` format, so every dscv3 flow shows "No resources found". |
