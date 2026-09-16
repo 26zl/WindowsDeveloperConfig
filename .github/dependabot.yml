@@ -9,3 +9,9 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+  - package-ecosystem: "nuget"
+    directory: "/src/future/cmdpal/QuickWingetSetup"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

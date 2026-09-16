@@ -15,11 +15,11 @@ This skill guides you through three related tasks that all revolve around
 
 1. **Discover** — enumerate and inspect resources available on the machine.
 2. **Author** — compose a valid `configuration.winget` file that follows
-   the rules in `AGENTS.md`.
+   the rules below.
 3. **Debug** — validate and diagnose an existing configuration.
 
-Read `AGENTS.md` at the repo root before starting. It is the authoritative
-source of rules; this skill translates those rules into concrete `dsc` commands.
+Source lives under `src/`: flows in `src/Workloads/<id>/`, the flow list in
+`src/manifest.yml`. This skill turns the repository's rules into concrete `dsc` commands.
 
 ---
 
@@ -48,7 +48,7 @@ dsc resource list -o json | ConvertFrom-Json | Select-Object -ExpandProperty typ
 ```
 
 For a new language/tool flow the two relevant types are:
-- **`Microsoft.WinGet/Package`** — dscv3 native resource (preferred, see AGENTS.md §3).
+- **`Microsoft.WinGet/Package`** — dscv3 native resource (preferred, see the schema table below).
 - **`Microsoft.WinGet.DSC/WinGetPackage`** — v0.2 PowerShell resource (fallback
   only when `PSDscResources/Script` is also needed).
 
@@ -60,7 +60,7 @@ dsc resource schema --resource Microsoft.WinGet/Package -o json | ConvertFrom-Js
 
 This emits the JSON Schema for the resource as a structured object. Drill into
 specific properties to confirm names and types — e.g. confirm that
-`acceptAgreements` (required by AGENTS.md §4) is present:
+`acceptAgreements` (required on every package resource) is present:
 
 ```powershell
 $schema = dsc resource schema --resource Microsoft.WinGet/Package -o json | ConvertFrom-Json
@@ -77,7 +77,7 @@ winget search <keyword>
 winget show <Publisher.Product>
 ```
 
-Per AGENTS.md §6, always use a **versioned** id (e.g. `Python.Python.3.14`),
+Always use a **versioned** id (e.g. `Python.Python.3.14`),
 never a bare id (e.g. `Python.Python`).
 
 ---
@@ -92,7 +92,7 @@ Use `ask_user` to confirm:
    `PSDscResources/Script`; otherwise → dscv3, which is strongly preferred).
 3. Whether there are install-order dependencies between packages.
 
-### Choose the schema version (AGENTS.md §3)
+### Choose the schema version
 
 | Need | Schema | Resource |
 |---|---|---|
@@ -203,7 +203,7 @@ Use when the script relies on a module or API only available in Windows PowerShe
       Set-ItemProperty -Path HKCU:\Software\MyApp -Name Setting -Value 1
 ```
 
-Key rules to enforce (AGENTS.md §4, §6, §12):
+Key rules to enforce:
 - `acceptAgreements: true` **must** appear on every `Microsoft.WinGet/Package`
   resource. Do not rely on CLI-level flags for consent.
 - `$schema` URL must be
@@ -246,11 +246,11 @@ properties:
 
 ### Write the file
 
-Place it at `scripts/windows/<id>/configuration.winget`. After writing, verify
+Place it at `src/Workloads/<id>/configuration.winget`. After writing, verify
 it parses cleanly:
 
 ```powershell
-python3 -c "import yaml; yaml.safe_load(open('scripts/windows/<id>/configuration.winget'))"
+python3 -c "import yaml; yaml.safe_load(open('src/Workloads/<id>/configuration.winget'))"
 ```
 
 ---
@@ -300,16 +300,16 @@ Logs are written to `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8weky
 
 ## Checklist Before Committing a New Flow
 
-Run the static checks from AGENTS.md §11:
+Run the static checks (the same ones `src/docs/development.md` lists):
 
 ```powershell
 # 1. YAML parses
-python3 -c "import yaml; yaml.safe_load(open('scripts/windows/<id>/configuration.winget'))"
+python3 -c "import yaml; yaml.safe_load(open('src/Workloads/<id>/configuration.winget'))"
 
-# 2. manifest.yml is valid
+# 2. src/manifest.yml is valid
 python3 - <<'PY'
 import yaml
-doc = yaml.safe_load(open("manifest.yml"))
+doc = yaml.safe_load(open("src/manifest.yml"))
 for flow in doc["flows"]:
     for os_name in flow["os"]:
         spec = flow.get(os_name) or {}

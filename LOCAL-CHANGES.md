@@ -2,7 +2,8 @@
 
 This is a vendored copy of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
 cloned at upstream commit `b5561d1`. Everything is upstream and unmodified **except** the
-files described below: `dev-config-nordp.winget` and two `configuration-local.winget` copies.
+files described below (`dev-config-nordp.winget`, two `configuration-local.winget` copies) and the
+review fixes listed at the end.
 
 ## `windows-dev-config/dev-config-nordp.winget`
 
@@ -42,16 +43,24 @@ winget configure --file .\windows-dev-config\dev-config-nordp.winget `
   --accept-configuration-agreements --disable-interactivity
 ```
 
-### Re-applying after an upstream update
+### Upstream status
 
-`dev-config-nordp.winget` is a snapshot, not a live overlay — pulling upstream will **not**
-update it. After `git pull`, regenerate it:
+`dev-config-nordp.winget` is a snapshot of `b5561d1`, not a live overlay. Upstream removed
+`dev-config.winget` and `install.ps1` in `ff7a538` (2026-09-16) and replaced them with a
+PowerShell flow: `windows-dev-config/bootstrap.ps1`, `dev-config.ps1` and `steps/*.ps1`. No newer
+upstream `dev-config.winget` will appear to regenerate this copy from.
+
+The replacement flow still enables Remote Desktop: `steps/registry-system.ps1` carries a
+`RemoteDesktop` entry that sets `fDenyTSConnections = 0`. Delete that entry before running it on
+this machine; upstream's `windows-dev-config/README.md` documents the same customization.
+
+`.local-run/remove-remotedesktop.patch` records the change against `b5561d1`. It was cut with plain
+`diff -u`, so `git apply` needs `-p0` and a fresh copy of the upstream file. From the repo root:
 
 ```powershell
-cd windows-dev-config
-git apply ..\.local-run\remove-remotedesktop.patch --directory=windows-dev-config 2>$null
-# if the patch no longer applies cleanly, re-cut it by hand and confirm:
-Select-String -Path .\dev-config-nordp.winget -Pattern 'fDenyTSConnections'   # must return nothing
+Copy-Item .\windows-dev-config\dev-config.winget .\windows-dev-config\dev-config-nordp.winget -Force
+git apply -p0 --ignore-whitespace --directory=windows-dev-config .\.local-run\remove-remotedesktop.patch
+Select-String -Path .\windows-dev-config\dev-config-nordp.winget -Pattern 'fDenyTSConnections'   # must return nothing
 ```
 
 ## Workloads (applied 2026-09-14)
@@ -131,8 +140,27 @@ Artifacts from the 2026-09-07 run — not part of upstream, safe to delete.
 | `revert-registry.ps1` | Restores the 23 registry values to their pre-run state |
 | `before-state.txt` | What those values were before the run |
 | `terminal-settings.json` | Windows Terminal settings.json as it was before the run |
-| `apply.log` | Full log of the run (50/50 units applied, exit 0) |
+| `apply.log` | Full log of the run (50/50 units applied, exit 0). Untracked: `.gitignore` ignores `*.log` |
 | `remove-remotedesktop.patch` | The diff documented above |
 
 Re-run `capture-state.ps1` before any future apply to refresh the revert point — it writes a
 fresh timestamped backup directory rather than overwriting this one.
+
+`capture-state.ps1` does not record the two `Themes\Personalize` values (`AppsUseLightTheme`,
+`SystemUsesLightTheme`) that the `darkTheme` unit sets. Add them to `$targets` before the next run
+if the theme should be part of the revert point.
+
+## Review fixes on top of upstream (2026-09-17)
+
+These edits touch upstream files. None of them are in `ff7a538`, so they are candidates for
+upstream pull requests.
+
+| File | Change |
+| --- | --- |
+| `src/Workloads/powershell/configuration.winget` | `Read-VSCodeSettings` no longer strips comments with a regex before `ConvertFrom-Json`. The block-comment pattern matched from `/**"` in one glob key to `"**/` in the next and deleted everything in between: `"**/.venv/**": true, "**/node_modules/**": true` became `"**/.venvnode_modules/**": true`. pwsh 7 parses JSONC comments and trailing commas natively. The unit still rewrites `settings.json` through `ConvertTo-Json`, so `configuration-local.winget` keeps it removed. |
+| `src/manifest.yml` | The `winforms` build wrote to `tests/winforms/bin` while `run` executed `src\tests\winforms\bin\hello.exe`. Both now use `src/tests/winforms/bin`. |
+| `.github/skills/dsc-resource-authoring/SKILL.md` | Removed references to a non-existent `AGENTS.md`. Paths updated from the old `scripts/windows/<id>/` layout to `src/Workloads/<id>/` and `src/manifest.yml`. |
+| `SUPPORT.md` | Replaced the untouched Microsoft template placeholders with the actual issue-reporting instructions. |
+| `.github/dependabot.yml` | Added a `nuget` entry for the Command Palette project so its packages get vulnerability and version updates. |
+| `.gitattributes` | `*.sh` is checked out with LF. Windows checkouts previously produced CRLF bash scripts. |
+| `src/tests/wsl-comfort-shell/` | Deleted. Nothing referenced it after the flow was renamed to `comfort-shell` (`src/tests/comfort-shell/`). |
