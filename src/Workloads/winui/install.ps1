@@ -11,8 +11,7 @@
     * enables Developer Mode,
     * installs the .NET 10 SDK and Windows App Development CLI,
     * installs Visual Studio 2026 Community, and
-    * adds the .NET Desktop, UWP, and Windows App SDK C# workloads/components,
-      plus the current Windows App Runtime 2.x.
+    * adds the .NET Desktop, UWP, and Windows App SDK C# workloads/components.
 
   The shim exists only to:
     * apply the DSC config with retry via `_common/apply-configuration.ps1`
