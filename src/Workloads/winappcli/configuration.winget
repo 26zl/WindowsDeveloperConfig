@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/PowerShell/DSC/main/schemas/2023/08/config/document.json
 #
-#     winget configure --file scripts/windows/winui/configuration.winget `
+#     winget configure --file Workloads/winappcli/configuration.winget `
 #         --accept-configuration-agreements `
 #         --disable-interactivity
 #
@@ -84,66 +84,12 @@ resources:
         securityContext: elevated
 
   - type: Microsoft.WinGet/Package
-    name: VisualStudio
-    properties:
-      id: Microsoft.VisualStudio.Community
-      source: winget
-      acceptAgreements: true
-    metadata:
-      description: Install Visual Studio 2026 Community
-      winget:
-        securityContext: elevated
-
-  - type: Microsoft.WinGet/Package
     name: WinAppCLI
     properties:
       id: Microsoft.WinAppCli
       source: winget
       acceptAgreements: true
     metadata:
-      description: Install Windows App SDK CLI (winappcli)
-      winget:
-        securityContext: elevated
-
-  - type: Microsoft.WinGet/Package
-    name: WindowsAppRuntime
-    properties:
-      id: Microsoft.WindowsAppRuntime.2
-      source: winget
-      acceptAgreements: true
-    metadata:
-      description: Install the current Windows App Runtime 2.x
-      winget:
-        securityContext: elevated
-
-  - type: Microsoft.DSC.Transitional/RunCommandOnSet
-    name: VSWorkloads
-    dependsOn:
-      - VisualStudio
-      - PowerShell7
-    properties:
-      executable: pwsh
-      arguments:
-        "0": -NoProfile
-        "1": -NoLogo
-        "2": -Command
-        "3": >-
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';
-          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found.' };
-          $setup = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\setup.exe';
-          if (-not (Test-Path $setup)) { throw 'Visual Studio setup.exe not found.' };
-          $installPath = & $vswhere -latest -products * -property installationPath;
-          if (-not $installPath) { throw 'Visual Studio installation path could not be determined.' };
-          & $setup modify --installPath $installPath
-          --channelId VisualStudio.18.Release
-          --productId Microsoft.VisualStudio.Product.Community
-          --add Microsoft.VisualStudio.Workload.ManagedDesktop
-          --add Microsoft.VisualStudio.Workload.Universal
-          --add Microsoft.VisualStudio.ComponentGroup.WindowsAppSDK.Cs
-          --quiet --norestart --wait;
-          if ($LASTEXITCODE -ne 0) { throw "Visual Studio workload installation failed with exit code $LASTEXITCODE." }
-        treatAsArray: true
-    metadata:
-      description: Install required VS workloads with Visual Studio Installer
+      description: Install Windows App Development CLI
       winget:
         securityContext: elevated

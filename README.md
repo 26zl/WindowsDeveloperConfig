@@ -131,7 +131,8 @@ Just want one toolchain? Pick a row. Each workload ships a `configuration.winget
 | SQL        | Lightweight SQL Developer: SQL Server + sqlcmd + VS Code extension     | `winget configure -f .\Workloads\sql\configuration.winget --accept-configuration-agreements --disable-interactivity`        |
 | PowerShell | PowerShell 7 + VS Code PowerShell extensions + PSScriptAnalyzer settings | `winget configure -f .\Workloads\powershell\configuration.winget --accept-configuration-agreements --disable-interactivity` |
 | WinForms   | .NET SDK 10 + Windows Forms desktop workload                            | `winget configure -f .\Workloads\winforms\configuration.winget --accept-configuration-agreements --disable-interactivity`   |
-| WinUI 3    | .NET SDK 10 + Visual Studio Community + Windows App SDK / WinUI 3 + WinAppCLI | `winget configure -f .\Workloads\winui\configuration.winget --accept-configuration-agreements --disable-interactivity` |
+| WinAppCLI  | Developer Mode + .NET SDK 10 + Windows App Development CLI             | `winget configure -f .\Workloads\winappcli\configuration.winget --accept-configuration-agreements --disable-interactivity` |
+| WinUI 3    | .NET SDK 10 + Visual Studio Community + current Windows App Runtime + Windows App SDK / WinUI 3 + WinAppCLI | `winget configure -f .\Workloads\winui\configuration.winget --accept-configuration-agreements --disable-interactivity` |
 
 Want the PATH refresh in your current shell? Use the matching shim instead of calling `winget configure` directly:
 
