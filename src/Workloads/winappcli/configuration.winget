@@ -10,50 +10,42 @@ metadata:
     processor: dscv3
 resources:
   - type: Microsoft.DSC.Transitional/RunCommandOnSet
-    name: Microsoft.Windows.Developer.Module
+    name: OsVersion
     properties:
       executable: powershell.exe
       arguments:
         "0": -NoProfile
         "1": -NoLogo
         "2": -Command
-        "3": if (-not (Get-Module -ListAvailable -Name Microsoft.Windows.Developer)) { Install-Module -Name Microsoft.Windows.Developer -Confirm:$False -Force -AllowPrerelease -AllowClobber }
+        "3": >-
+          $minimum = [version]'10.0.17763';
+          $current = [Environment]::OSVersion.Version;
+          if ($current -lt $minimum) {
+            throw "Windows $minimum or later is required. Current version: $current."
+          }
         treatAsArray: true
-    metadata:
-      description: Ensure Microsoft.Windows.Developer module is installed
-
-  - type: Microsoft.Windows.Developer/OsVersion
-    name: OsVersion
-    dependsOn:
-      - Microsoft.Windows.Developer.Module
-    properties:
-      MinVersion: '10.0.17763'
     metadata:
       description: Verify min OS version (Windows 10 1809+)
-      allowPrerelease: true
 
   - type: Microsoft.DSC.Transitional/RunCommandOnSet
-    name: Microsoft.Windows.Settings.Module
+    name: DeveloperMode
     properties:
       executable: powershell.exe
       arguments:
         "0": -NoProfile
         "1": -NoLogo
         "2": -Command
-        "3": if (-not (Get-Module -ListAvailable -Name Microsoft.Windows.Settings)) { Install-Module -Name Microsoft.Windows.Settings -Confirm:$False -Force -AllowPrerelease -AllowClobber }
+        "3": >-
+          $path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock';
+          if (-not (Test-Path $path)) {
+            New-Item -Path $path -Force | Out-Null
+          };
+          if ((Get-ItemPropertyValue -Path $path -Name AllowDevelopmentWithoutDevLicense -ErrorAction SilentlyContinue) -ne 1) {
+            New-ItemProperty -Path $path -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+          }
         treatAsArray: true
     metadata:
-      description: Ensure Microsoft.Windows.Settings module is installed
-
-  - type: Microsoft.Windows.Settings/WindowsSettings
-    name: DeveloperMode
-    dependsOn:
-      - Microsoft.Windows.Settings.Module
-    properties:
-      DeveloperMode: true
-    metadata:
       description: Enable Developer Mode
-      allowPrerelease: true
       winget:
         securityContext: elevated
 
