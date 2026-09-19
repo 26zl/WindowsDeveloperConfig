@@ -39,9 +39,10 @@ Upstream replaced the DSC document with `windows-dev-config/bootstrap.ps1`, `dev
 3. Guards the `Lxss` registry key in the staged `steps\wsl.ps1` (see "Audit fixes" below). It
    fails if it finds anything other than exactly one unguarded `New-Item -Path $lxssPath -Force`.
 4. Optionally trims the staged copy: `-SkipSteps` deletes phase files (`dev-config.ps1` skips a
-   phase whose file is missing), `-SkipPackages` removes winget IDs from `steps\packages.ps1`, and
-   `-KeepNotifications` removes the `DoNotDisturb` tweak. Every removal has to match exactly one
-   entry, otherwise the script stops.
+   phase whose file is missing), `-SkipPackages` removes winget IDs from `steps\packages.ps1`,
+   `-SkipTweaks` removes single registry tweaks by name, and `-KeepNotifications` is shorthand
+   for `-SkipTweaks DoNotDisturb`. Every removal has to match exactly one entry, otherwise the
+   script stops.
 5. Runs `pwsh -NoProfile -File <staged>\dev-config.ps1 -AllowUnsigned`. The flow requests UAC by
    itself. `-NoLaunch` stages and prints the command instead of running it.
 
@@ -221,6 +222,7 @@ and the fork's own snapshot.
 | --- | --- |
 | `.local-run/apply-ps-flow.ps1` | **Guards the `Lxss` key.** Upstream `steps\wsl.ps1` (line 178 in `062a375`) runs `New-Item -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss -Force` without a `Test-Path` check. In the registry provider, `-Force` on an existing key silently deletes its values **and subkeys** (verified on PowerShell 7.6.6 and Windows PowerShell 5.1 with a scratch key), and the subkeys of `Lxss` are the WSL distro registrations. The step runs whenever `wsl --list` shows no `Ubuntu*` distro, so a machine with only Debian or docker-desktop loses those registrations (the VHDX files survive, but the distros have to be re-imported). The staged copy now only creates the key when it is missing. The repo's own helper `steps\_registry.ps1` already has that guard. Candidate for an upstream issue/PR. |
 | `.local-run/apply-ps-flow.ps1` | New `-SkipSteps`, `-SkipPackages` and `-KeepNotifications`. Upstream has no skip switch and no dry run; the only supported way to leave a phase out is a missing phase file, which is what `-SkipSteps` produces in the staged copy. `-KeepNotifications` exists because `DoNotDisturb` (`NOC_GLOBAL_SETTING_TOASTS_ENABLED=0`) also hides Defender, Controlled Folder Access and BitLocker toasts. Skipping `wsl` removes the flow's only forced reboot (`shutdown /r /t 0 /f` after 10 s), which matters on a machine that stops at a BitLocker PIN prompt. The summary line now lists every change made to the staged copy. |
+| `.local-run/apply-ps-flow.ps1` | New `-SkipTweaks`. Found on the first real run on the second machine (Windows 11 25H2, build 26200): `WidgetServiceOff` fails with "Attempted to perform an unauthorized operation" although Administrators have FullControl on `HKLM\SOFTWARE\Policies\Microsoft\Dsh`. `UCPD.sys` (User Choice Protection Driver) is running and denies PowerShell the write. The registry tweaks are not best-effort upstream, so that one failure stopped the run before the Edge, fonts and Terminal phases. With `-SkipTweaks WidgetServiceOff` the run completes (exit 0). |
 | `.gitignore` | `devconfig-log.txt` is now ignored. The old comment claimed `*.log` covered it; it does not, so a transcript with machine name, user name and paths could be committed to this public fork. |
 | `windows-dev-config/dev-config-nordp.winget` | The `RebootForVmp` resume command pointed at `dev-config.winget`, which does not exist in this fork, so a post-reboot resume would fail. It now points at `dev-config-nordp.winget`. This is one functional line on top of `remove-remotedesktop.patch`; the snapshot otherwise still equals upstream `b5561d1` minus the RemoteDesktop resource. The two comment lines that mention `dev-config.winget` are upstream text and unchanged. |
 

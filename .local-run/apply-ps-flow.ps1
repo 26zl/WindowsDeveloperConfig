@@ -6,7 +6,7 @@
   removes the RemoteDesktop tweak from steps\registry-system.ps1, verifies that nothing in the
   staged copy still references fDenyTSConnections, guards the Lxss registry key in steps\wsl.ps1
   so existing WSL distro registrations are never wiped, optionally trims the staged copy
-  (-SkipSteps, -SkipPackages, -KeepNotifications) and launches dev-config.ps1 -AllowUnsigned on
+  (-SkipSteps, -SkipPackages, -SkipTweaks, -KeepNotifications) and launches dev-config.ps1 -AllowUnsigned on
   PowerShell 7. The flow elevates itself through UAC and resumes from the staged folder if it
   has to reboot. Upstream files in the checkout are never modified.
 .PARAMETER InstallRoot
@@ -17,9 +17,15 @@
 .PARAMETER SkipPackages
   winget package IDs to remove from the staged steps\packages.ps1, e.g. GitHub.Copilot.
   Each ID has to match exactly one entry.
+.PARAMETER SkipTweaks
+  Names of single registry tweaks to remove from the staged steps\registry-*.ps1 and
+  steps\edge.ps1, e.g. WidgetServiceOff. Each name has to match exactly one entry. Registry
+  tweaks are not best-effort upstream, so one that cannot be written stops the whole run;
+  WidgetServiceOff is the known case (UCPD.sys denies PowerShell the write to
+  HKLM\SOFTWARE\Policies\Microsoft\Dsh, even elevated).
 .PARAMETER KeepNotifications
-  Removes the DoNotDisturb tweak from the staged steps\registry-taskbar-search.ps1, so toasts
-  (Defender, Controlled Folder Access, BitLocker, update restarts) stay visible.
+  Same as -SkipTweaks DoNotDisturb: toasts (Defender, Controlled Folder Access, BitLocker,
+  update restarts) stay visible.
 .PARAMETER NoLaunch
   Stage and verify only, then print the command to run.
 #>
@@ -30,6 +36,7 @@ param(
         'edge', 'fonts', 'terminal', 'powershell-profile', 'copilot', 'wsl')]
     [string[]] $SkipSteps = @(),
     [string[]] $SkipPackages = @(),
+    [string[]] $SkipTweaks = @(),
     [switch] $KeepNotifications,
     [switch] $NoLaunch
 )
@@ -113,9 +120,19 @@ if ($unguarded.Count -gt 0) {
 }
 $changes.Add('Lxss key guarded in steps\wsl.ps1 (existing WSL distros stay registered)')
 
-if ($KeepNotifications) {
-    Edit-StagedLine -Path (Join-Path $stagedSteps 'registry-taskbar-search.ps1') -Pattern "Name\s*=\s*'DoNotDisturb'" -What 'DoNotDisturb entry'
-    $changes.Add('DoNotDisturb removed from steps\registry-taskbar-search.ps1')
+$tweakNames = @($SkipTweaks)
+if ($KeepNotifications -and $tweakNames -notcontains 'DoNotDisturb') {
+    $tweakNames += 'DoNotDisturb'
+}
+$tweakFiles = @(Get-ChildItem -LiteralPath $stagedSteps -File | Where-Object { $_.Name -like 'registry-*.ps1' -or $_.Name -eq 'edge.ps1' })
+foreach ($tweak in $tweakNames) {
+    $pattern = "Name\s*=\s*'$([regex]::Escape($tweak))'"
+    $owners  = @($tweakFiles | Where-Object { Select-String -LiteralPath $_.FullName -Pattern $pattern -Quiet })
+    if ($owners.Count -ne 1) {
+        throw "Expected the tweak '$tweak' in exactly one of the staged registry step files, found it in $($owners.Count)."
+    }
+    Edit-StagedLine -Path $owners[0].FullName -Pattern $pattern -What "$tweak entry"
+    $changes.Add("$tweak removed from steps\$($owners[0].Name)")
 }
 
 if ($SkipPackages.Count -gt 0) {
