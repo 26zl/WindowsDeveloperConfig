@@ -36,12 +36,24 @@ Upstream replaced the DSC document with `windows-dev-config/bootstrap.ps1`, `dev
 2. Deletes the `RemoteDesktop` entry from the staged `steps\registry-system.ps1`. It fails if it
    finds anything other than exactly one such entry, or if `fDenyTSConnections` is still referenced
    anywhere under `steps\`.
-3. Runs `pwsh -NoProfile -File <staged>\dev-config.ps1 -AllowUnsigned`. The flow requests UAC by
+3. Guards the `Lxss` registry key in the staged `steps\wsl.ps1` (see "Audit fixes" below). It
+   fails if it finds anything other than exactly one unguarded `New-Item -Path $lxssPath -Force`.
+4. Optionally trims the staged copy: `-SkipSteps` deletes phase files (`dev-config.ps1` skips a
+   phase whose file is missing), `-SkipPackages` removes winget IDs from `steps\packages.ps1`,
+   `-SkipTweaks` removes single registry tweaks by name, and `-KeepNotifications` is shorthand
+   for `-SkipTweaks DoNotDisturb`. Every removal has to match exactly one entry, otherwise the
+   script stops.
+5. Runs `pwsh -NoProfile -File <staged>\dev-config.ps1 -AllowUnsigned`. The flow requests UAC by
    itself. `-NoLaunch` stages and prints the command instead of running it.
 
 ```powershell
 .\.local-run\apply-ps-flow.ps1            # stage + run
 .\.local-run\apply-ps-flow.ps1 -NoLaunch  # stage only
+
+# Trimmed run for a machine that already has its own profile, WSL distros and no Copilot:
+.\.local-run\apply-ps-flow.ps1 -NoLaunch -KeepNotifications `
+    -SkipSteps wsl, copilot, powershell-profile `
+    -SkipPackages GitHub.Copilot, CoreyButler.NVMforWindows
 ```
 
 Not run on this machine yet. Compared with the DSC run of 2026-09-07, this flow also:
@@ -157,6 +169,11 @@ Both generations of the flow gate their WSL work on the same signals, and both a
 Re-check both before applying on a *different* machine, where they would fire and the run
 **would** reboot.
 
+The "State here" column describes the machine this file was written on. On a machine without an
+`Ubuntu*` distro the PowerShell flow's `WslUbuntu` step runs, and upstream's step wipes the other
+distro registrations first (see "Audit fixes" below). `apply-ps-flow.ps1` guards against that;
+the signed copy and `bootstrap.ps1` do not.
+
 ## `.local-run/`
 
 Local tooling and the artifacts of the 2026-09-07 run. Not part of upstream, safe to delete.
@@ -164,7 +181,7 @@ Local tooling and the artifacts of the 2026-09-07 run. Not part of upstream, saf
 | File | What it is |
 | --- | --- |
 | `apply.ps1` | Elevated apply wrapper for the DSC snapshot, location-independent |
-| `apply-ps-flow.ps1` | Stages and runs upstream's PowerShell flow without the RemoteDesktop step |
+| `apply-ps-flow.ps1` | Stages and runs upstream's PowerShell flow without the RemoteDesktop step, with the `Lxss` guard and optional `-SkipSteps` / `-SkipPackages` / `-KeepNotifications` |
 | `capture-state.ps1` | Records the current registry state and regenerates `revert-registry.ps1` for both flows |
 | `revert-registry.ps1` | Restores the 23 registry values to their pre-run state of 2026-09-07 |
 | `before-state.txt` | What those values were before the run |
@@ -193,3 +210,33 @@ upstream pull requests.
 | `src/tests/wsl-comfort-shell/` | Deleted. Nothing referenced it after the flow was renamed to `comfort-shell` (`src/tests/comfort-shell/`). |
 | `src/wsl-comfort/install.ps1`, `readme.md` | The closing message names the profile the script actually creates (`Comfort Shell - <distro>`), and the readme names the real function (`Get-InstalledWslDistros`). |
 | `src/future/cmdpal/` | `ExtensionConfig` defaults point at `microsoft/WindowsDeveloperConfig` `main` and `src/manifest.yml` instead of a private personal clone path. The fix-it script path is `Workloads/_common/enable-winget-configure.ps1`; the `scripts/windows/` layout no longer exists. README config example and build path updated. Still open: the DSC summary parser understands only the v0.2 `- resource:` format, so every dscv3 flow shows "No resources found". |
+
+## Audit fixes (2026-09-19)
+
+Found while reviewing the whole fork line by line before running it on a second, hardened machine
+(Debian + docker-desktop in WSL, no Ubuntu; Controlled Folder Access on; BitLocker with a startup
+PIN). Upstream files are still untouched; everything below lives in `.local-run/`, `.gitignore`
+and the fork's own snapshot.
+
+| File | Change |
+| --- | --- |
+| `.local-run/apply-ps-flow.ps1` | **Guards the `Lxss` key.** Upstream `steps\wsl.ps1` (line 178 in `062a375`) runs `New-Item -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss -Force` without a `Test-Path` check. In the registry provider, `-Force` on an existing key silently deletes its values **and subkeys** (verified on PowerShell 7.6.6 and Windows PowerShell 5.1 with a scratch key), and the subkeys of `Lxss` are the WSL distro registrations. The step runs whenever `wsl --list` shows no `Ubuntu*` distro, so a machine with only Debian or docker-desktop loses those registrations (the VHDX files survive, but the distros have to be re-imported). The staged copy now only creates the key when it is missing. The repo's own helper `steps\_registry.ps1` already has that guard. Candidate for an upstream issue/PR. |
+| `.local-run/apply-ps-flow.ps1` | New `-SkipSteps`, `-SkipPackages` and `-KeepNotifications`. Upstream has no skip switch and no dry run; the only supported way to leave a phase out is a missing phase file, which is what `-SkipSteps` produces in the staged copy. `-KeepNotifications` exists because `DoNotDisturb` (`NOC_GLOBAL_SETTING_TOASTS_ENABLED=0`) also hides Defender, Controlled Folder Access and BitLocker toasts. Skipping `wsl` removes the flow's only forced reboot (`shutdown /r /t 0 /f` after 10 s), which matters on a machine that stops at a BitLocker PIN prompt. The summary line now lists every change made to the staged copy. |
+| `.local-run/apply-ps-flow.ps1` | New `-SkipTweaks`. Found on the first real run on the second machine (Windows 11 25H2, build 26200): `WidgetServiceOff` fails with "Attempted to perform an unauthorized operation" although Administrators have FullControl on `HKLM\SOFTWARE\Policies\Microsoft\Dsh`. `UCPD.sys` (User Choice Protection Driver) is running and denies PowerShell the write. The registry tweaks are not best-effort upstream, so that one failure stopped the run before the Edge, fonts and Terminal phases. With `-SkipTweaks WidgetServiceOff` the run completes (exit 0). |
+| `.gitignore` | `devconfig-log.txt` is now ignored. The old comment claimed `*.log` covered it; it does not, so a transcript with machine name, user name and paths could be committed to this public fork. |
+| `windows-dev-config/dev-config-nordp.winget` | The `RebootForVmp` resume command pointed at `dev-config.winget`, which does not exist in this fork, so a post-reboot resume would fail. It now points at `dev-config-nordp.winget`. This is one functional line on top of `remove-remotedesktop.patch`; the snapshot otherwise still equals upstream `b5561d1` minus the RemoteDesktop resource. The two comment lines that mention `dev-config.winget` are upstream text and unchanged. |
+
+Still true after these fixes, and worth knowing before running anything else in this repo:
+
+- The signed copy under `windows-dev-config\` and `src\windows-dev-config\steps\registry-system.ps1`
+  both still contain `fDenyTSConnections = 0`. Only `apply-ps-flow.ps1` and the nordp snapshot are
+  RDP-free. `bootstrap.ps1` and the README one-liner hard-code `microsoft/WindowsDeveloperConfig`,
+  so they always download upstream `main` (with RDP, without the Lxss guard), never this fork.
+- `signed-copy-guard` only runs on pull requests and never calls `Get-AuthenticodeSignature`; it is
+  a drift reporter, not a signature check.
+- `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
+  `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
+  `winget configure` by hand.
+- The "State here" remarks above (Ubuntu registered, workloads applied 2026-09-14, revert point of
+  2026-09-07) describe the first machine. Run `capture-state.ps1` on any other machine before
+  applying; the committed `revert-registry.ps1` is not valid there.

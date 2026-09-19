@@ -103,7 +103,7 @@ resources:
     setScript: |
       # ${WinGetConfigRoot} is set by winget configure to the directory
       # containing the config file being applied.
-      $configFile = "${WinGetConfigRoot}\dev-config.winget"
+      $configFile = "${WinGetConfigRoot}\dev-config-nordp.winget"
       $resumeCmd  = "winget configure --file `"$configFile`" --accept-configuration-agreements"
 
       # RunOnce entries are deleted by Windows automatically before they
