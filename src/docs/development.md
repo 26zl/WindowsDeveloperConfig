@@ -53,7 +53,8 @@ Command Palette extension.
 | SQL Developer     | 🙋 manual     | Lightweight SQL Developer: SQL Server + sqlcmd + VS Code extension; no VS/SSDT           |
 | PowerShell        | ✅ automated   | `Microsoft.PowerShell`, `Microsoft.VisualStudioCode`, VS Code PowerShell/Pester extensions + PSScriptAnalyzer settings |
 | WinForms          | 🙋 manual     | `Microsoft.DotNet.SDK.10` + the .NET desktop workload (multi-GB; manual to spare CI minutes) |
-| WinUI 3           | 🙋 manual     | `Microsoft.DotNet.SDK.10`, `Microsoft.VisualStudio.Community`, `Microsoft.WinAppCLI` + WinUI/Universal/ManagedDesktop VS workloads |
+| WinAppCLI         | ✅ automated   | Developer Mode + `Microsoft.DotNet.SDK.10` + `Microsoft.WinAppCli` |
+| WinUI 3           | 🙋 manual     | `Microsoft.DotNet.SDK.10`, `Microsoft.VisualStudio.Community`, `Microsoft.WinAppCli` + WinUI/Universal/ManagedDesktop VS workloads |
 | Windows Dev Config | 🙋 manual     | A full distraction-free workstation, in PowerShell: 15 apps + 24 registry values + fonts + Windows Terminal + WSL + Ubuntu (see [`windows-dev-config/README.md`](../windows-dev-config/README.md)) |
 | Comfort Shell     | 🙋 manual     | WSL distro + zsh/bash + starship + modern CLI bundle + Cascadia Code Nerd Font + themed Windows Terminal profile (see [`wsl-comfort/readme.md`](../wsl-comfort/readme.md)) |
 
@@ -128,7 +129,7 @@ This repo carries **two parallel copies** of every flow:
 | `src/docs/development.md`     | Contributor docs (CI, validation, how to add a language).         | **Yes**  | n/a      |
 | `src/tests/`                  | Hello-world programs + expected stdout used by the CI harness.    | **Yes**  | CI only  |
 
-**End users**: the commands in the top-level [README](../../README.md) point at the **top-level signed copies** wherever those copies exist, so on a Windows box you don't need to know `src/` exists. The one exception is Windows Dev Config: its `bootstrap.ps1` is new and hasn't been through a sign cycle yet, so the README's one-liner points at `src/windows-dev-config/bootstrap.ps1`. That's deliberate — the bootstrap requires the *signed* payload from the repository root by default, verifies every payload `.ps1` has a valid Microsoft Corporation Authenticode signature, and stops before installation if any check fails. Contributors can explicitly select `src/windows-dev-config/` and bypass signature validation with `-AllowUnsigned` while testing a ref before its signed copy exists. Repoint the README at the top-level copy once it lands.
+**End users**: follow the [top-level README](../../README.md). Windows Dev Config's `bootstrap.ps1` verifies Microsoft signatures and installs to `%ProgramData%\CalmOS` with Administrator/SYSTEM-only write access. It requests process-scoped `RemoteSigned` without adding trusted publishers. Organization-enforced `AllSigned` may still prompt. For development, `-AllowUnsigned` uses `src/windows-dev-config/` without signature checks.
 
 **Contributors**: edit `src/`. The top-level paths are **regenerated** by [`.pipelines/OneBranch.SignAndPackage.yml`](../../.pipelines/OneBranch.SignAndPackage.yml), which Authenticode-signs every `src/**/*.ps1` and ships them (plus the `.winget` configs and the manifest) as the release artifact. The signed copies were merged into `main` from the `signed` branch in [PR #6](https://github.com/microsoft/WindowsDeveloperConfig/pull/6). A change to a `src/` script becomes a new signed top-level copy on the next sign cycle, not at PR merge, so the two can briefly disagree on a script's body until that cycle runs.
 

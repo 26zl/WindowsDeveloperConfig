@@ -9,6 +9,7 @@
   (https://learn.microsoft.com/windows/apps/get-started/start-here):
     * asserts minimum OS version,
     * enables Developer Mode,
+    * installs the .NET 10 SDK and Windows App Development CLI,
     * installs Visual Studio 2026 Community, and
     * adds the .NET Desktop, UWP, and Windows App SDK C# workloads/components.
 
@@ -17,7 +18,7 @@
       (which passes `--accept-configuration-agreements` and
       `--disable-interactivity`),
     * rehydrate PATH in the current session so later CI steps see `dotnet`,
-    * verify `dotnet` resolves, and
+    * verify `dotnet` and `winapp` resolve, and
     * emit `INSTALL_OK: winui` for the test harness.
 #>
 
@@ -30,4 +31,4 @@ Set-StrictMode -Version Latest
 & (Join-Path $PSScriptRoot '..\_common\apply-configuration.ps1') `
     -Id              'winui' `
     -ConfigFile      (Join-Path $PSScriptRoot 'configuration.winget') `
-    -RequireCommands @('dotnet')
+    -RequireCommands @('dotnet', 'winapp')

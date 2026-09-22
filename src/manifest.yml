@@ -146,6 +146,22 @@ flows:
       expected: src/tests/winui/expected.txt
       version: "dotnet --version"
 
+  - id: winappcli
+    name: WinAppCLI
+    description: Developer Mode + .NET SDK 10 + Windows App Development CLI
+    category: desktop
+    tags: [dotnet, csharp, winapp, winappcli, winui, windows, desktop]
+    icon: 🪟
+    onboardingUrl: https://learn.microsoft.com/windows/apps/dev-tools/winapp-cli/
+    os: [windows]
+    windows:
+      install: Workloads/winappcli/install.ps1
+      configuration: Workloads/winappcli/configuration.winget
+      build: ""
+      run: pwsh -NoProfile -File src/tests/winappcli/probe.ps1
+      expected: src/tests/winappcli/expected.txt
+      version: "dotnet --version; winapp --version"
+
   - id: dotnet
     name: .NET
     description: .NET 10 SDK (cross-platform; foundation for the web-api-csharp scenario)
