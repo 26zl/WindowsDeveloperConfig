@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `ff7a538`, 2026-09-17). Everything is upstream and
+kept in sync with upstream `main` (last merged: `bf74ae3`, 2026-09-22). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -25,9 +25,12 @@ step.
 ### PowerShell flow (current upstream): `.local-run/apply-ps-flow.ps1`
 
 Upstream replaced the DSC document with `windows-dev-config/bootstrap.ps1`, `dev-config.ps1` and
-`steps/*.ps1` in `ff7a538` (2026-09-16). The signed copy at the repo root only runs under the
-`AllSigned` execution policy, so a modified copy has to be the unsigned one under `src/` run with
-`-AllowUnsigned`, which is exactly how upstream's README says to customize it.
+`steps/*.ps1` in `ff7a538` (2026-09-16). Since #103 (merged here with `bf74ae3`) the signed flow
+refuses to start unless every `.ps1` has a valid Microsoft signature and the folder it runs from
+is owned by Administrators/SYSTEM and writable by no one else, so a modified copy has to be the
+unsigned one under `src/` run with `-AllowUnsigned`, which is exactly how upstream's README says
+to customize it. With `-AllowUnsigned` both checks are skipped, so the staged copy under
+`%LOCALAPPDATA%` still runs.
 
 `apply-ps-flow.ps1` does that without touching the checkout:
 
@@ -234,6 +237,14 @@ Still true after these fixes, and worth knowing before running anything else in 
   so they always download upstream `main` (with RDP, without the Lxss guard), never this fork.
 - `signed-copy-guard` only runs on pull requests and never calls `Get-AuthenticodeSignature`; it is
   a drift reporter, not a signature check.
+- Since the sync to `bf74ae3`, `.gitattributes` checks out every `.ps1` under `Workloads\` and
+  `wsl-comfort\` byte for byte (`-text`). Those blobs were committed with LF line endings, so a
+  fresh clone or ZIP of this fork, or of upstream `main`, gets them without CRLF and
+  `Get-AuthenticodeSignature` reports `NotSigned` for all 18. Before, they checked out with CRLF
+  and 12 of the 17 under `Workloads\` were `Valid`; the other 5 (`php`, `python`, `typescript`,
+  `winforms` and `winui` `install.ps1`) were already `HashMismatch`. An existing checkout keeps
+  its CRLF files until git rewrites them. Only `windows-dev-config\` (25 files, re-committed as
+  raw bytes in #107) is `Valid` in a fresh clone.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
