@@ -11,7 +11,9 @@ $Script:DevConfigCheckMark = [char]0x2713
 
 # Defaults allow the step runner to load before the orchestrator sets run state.
 $Script:DevConfigResumed     = $false
+$Script:DevConfigAction      = 'Full'
 $Script:DevConfigTally       = @{ Done = 0; AlreadyOk = 0; Warned = 0 }
+$Script:DevConfigTalliedSteps = @{}
 # Persist flagged names so a blocked step is counted once across the reboot.
 $Script:DevConfigWarnedSteps      = @()
 $Script:DevConfigSilentSkips      = 0
@@ -40,35 +42,51 @@ function Show-DevConfigPhaseHeader {
     $Script:DevConfigPhaseHeaderShown = $true
 }
 
-# Save the tally across the reboot so the final summary covers the whole run.
+# Save progress and Terminal backup tracking across the reboot.
 function Save-DevConfigTally {
     param(
-        [Parameter(Mandatory)] [string] $Path
+        [Parameter(Mandatory)] [string] $Path,
+        [string[]] $TerminalBackedUp = @()
     )
     try {
         $state = [pscustomobject]@{
-            Done        = $Script:DevConfigTally.Done
-            AlreadyOk   = $Script:DevConfigTally.AlreadyOk
-            WarnedSteps = ($Script:DevConfigWarnedSteps -join ',')
+            Done             = $Script:DevConfigTally.Done
+            AlreadyOk        = $Script:DevConfigTally.AlreadyOk
+            TalliedSteps     = $Script:DevConfigTalliedSteps
+            WarnedSteps      = ($Script:DevConfigWarnedSteps -join ',')
+            TerminalBackedUp = @($TerminalBackedUp)
         }
         $state | ConvertTo-Json -Compress | Set-Content -LiteralPath $Path -Encoding UTF8
     } catch {
-        Write-Verbose "Could not save the tally before reboot: $($_.Exception.Message)"
+        throw "Could not save setup progress before reboot: $($_.Exception.Message)"
     }
 }
 
-# Best-effort restore: a missing or unreadable file limits the summary to this process.
+# Unknown backup state prevents resumed Terminal changes from overwriting an original.
 function Restore-DevConfigTally {
     param(
         [Parameter(Mandatory)] [string] $Path
     )
+    $Script:DevConfigTerminalBackedUp = $null
     if (-not (Test-Path -LiteralPath $Path)) {
         return
     }
     try {
         $saved = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($saved.PSObject.Properties['TerminalBackedUp'] -and $null -ne $saved.TerminalBackedUp) {
+            $backupPaths = @($saved.TerminalBackedUp)
+            if (@($backupPaths | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+                throw 'The saved Terminal backup paths are invalid.'
+            }
+            $Script:DevConfigTerminalBackedUp = $backupPaths
+        }
         $Script:DevConfigTally.Done      += [int]$saved.Done
         $Script:DevConfigTally.AlreadyOk += [int]$saved.AlreadyOk
+        if ($saved.PSObject.Properties['TalliedSteps']) {
+            foreach ($property in $saved.TalliedSteps.PSObject.Properties) {
+                $Script:DevConfigTalliedSteps[$property.Name] = [string]$property.Value
+            }
+        }
         if ($saved.WarnedSteps) {
             foreach ($name in ($saved.WarnedSteps -split ',')) {
                 if ($Script:DevConfigWarnedSteps -notcontains $name) {
@@ -78,7 +96,7 @@ function Restore-DevConfigTally {
         }
         $Script:DevConfigTally.Warned = $Script:DevConfigWarnedSteps.Count
     } catch {
-        Write-Verbose "Could not restore the pre-reboot tally: $($_.Exception.Message)"
+        Write-Warning "Could not restore setup progress after reboot: $($_.Exception.Message)"
     } finally {
         Remove-Item -LiteralPath $Path -ErrorAction SilentlyContinue
     }
@@ -120,6 +138,11 @@ function Write-DevConfigStepFlag {
         [Parameter(Mandatory)] [string] $Label,
         [Parameter(Mandatory)] [string] $Message
     )
+    $previous = $Script:DevConfigTalliedSteps[$Name]
+    if ($previous) {
+        $Script:DevConfigTally[$previous]--
+        $Script:DevConfigTalliedSteps.Remove($Name)
+    }
     if ($Script:DevConfigWarnedSteps -notcontains $Name) {
         $Script:DevConfigWarnedSteps += $Name
     }
@@ -148,6 +171,22 @@ function Set-DevConfigStepUnverified {
     $Script:DevConfigStepUnverified = $Reason
 }
 
+function Set-DevConfigStepTally {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [ValidateSet('Done', 'AlreadyOk')] [string] $State
+    )
+    $previous = $Script:DevConfigTalliedSteps[$Name]
+    if ($previous -eq 'Done' -or $previous -eq $State) {
+        return
+    }
+    if ($previous) {
+        $Script:DevConfigTally[$previous]--
+    }
+    $Script:DevConfigTally[$State]++
+    $Script:DevConfigTalliedSteps[$Name] = $State
+}
+
 function Invoke-DevConfigSteps {
     param(
         [Parameter(Mandatory)] [object[]] $Steps
@@ -171,7 +210,7 @@ function Invoke-DevConfigSteps {
         }
         # Tally before printing so collapsed phases still count.
         if ($alreadyDone) {
-            $Script:DevConfigTally.AlreadyOk++
+            Set-DevConfigStepTally -Name $step.Name -State AlreadyOk
             # Clearing here also covers resumed phases that return before the reporting loop.
             Clear-DevConfigStepFlag -Name $step.Name
         }
@@ -211,7 +250,7 @@ function Invoke-DevConfigSteps {
             } elseif (-not [bool](& $step.Check @stepArgs)) {
                 throw "ran, but the follow-up check still says it isn't done."
             } else {
-                $Script:DevConfigTally.Done++
+                Set-DevConfigStepTally -Name $step.Name -State Done
                 Clear-DevConfigStepFlag -Name $step.Name
                 Write-Host "  $Script:DevConfigCheckMark $label done" -ForegroundColor Green
             }

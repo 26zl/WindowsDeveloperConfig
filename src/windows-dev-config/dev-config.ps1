@@ -1,13 +1,15 @@
 <#
 .SYNOPSIS
-  Configures a Windows developer workstation and resumes after the WSL reboot.
+  Configures or cleans up a Windows developer workstation.
 #>
 
 [CmdletBinding()]
 param(
     [switch] $NoElevate,
     [switch] $Resumed,
-    [switch] $AllowUnsigned
+    [switch] $AllowUnsigned,
+    [switch] $ApplyTerminalFont,
+    [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,18 +51,49 @@ try {
 . (Join-Path $stepsDir '_winget.ps1')
 . (Join-Path $stepsDir '_pwsh-bootstrap.ps1')
 
+$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
+if ($ApplyTerminalFont) {
+    . (Join-Path $stepsDir 'fonts.ps1')
+    $pendingPath = Get-DevConfigPendingTerminalFontPath
+    if (-not (Test-Path -LiteralPath $pendingPath)) {
+        Write-Host 'No Terminal font update is pending.'
+        exit 0
+    }
+    $logPath = [IO.Path]::ChangeExtension($pendingPath, '.log')
+    Start-DevConfigLog -Path $logPath
+    $failure = $null
+    try {
+        Invoke-DevConfigPendingTerminalFont
+    } catch {
+        $failure = $_
+        Write-Host "The Terminal font update failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Full log: $logPath" -ForegroundColor DarkGray
+    } finally {
+        Stop-DevConfigLog
+    }
+    if ($failure) {
+        Wait-DevConfigKeyPress -TimeoutSeconds 60
+        exit 1
+    }
+    exit 0
+}
+
 # TLS is configured before any download step runs.
 Enable-DevConfigModernTls
 
-Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
+Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action
 
-# WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
-Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
+if ($Action -eq 'Uninstall') {
+    Invoke-DevConfigEnsureCleanupShell -ScriptPath $PSCommandPath -AllowUnsigned:$AllowUnsigned
+} else {
+    # WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
+    Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action
+}
 
 # The lock starts after relaunches so the worker process owns the log file.
 if (-not (Enter-DevConfigSingleInstance)) {
     Write-Host ''
-    Write-Host 'Calm OS setup is already running in another window.' -ForegroundColor Yellow
+    Write-Host 'Calm OS is already running in another window.' -ForegroundColor Yellow
     Write-Host 'Switch to it rather than starting a second copy -- they would fight over the same installs.' -ForegroundColor DarkGray
     Wait-DevConfigKeyPress
     exit 1
@@ -71,33 +104,100 @@ Start-DevConfigLog -Path (Join-Path $PSScriptRoot 'devconfig-log.txt') -Append:$
 # Any prior resume task is stale once this run starts.
 Clear-DevConfigResume
 
-$Script:DevConfigResumed = [bool]$Resumed
-$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
+$Script:DevConfigResumed = [bool]$Resumed -and $Action -ne 'Uninstall'
+$Script:DevConfigAction = $Action
 if ($Script:DevConfigResumed) {
     # Restore the pre-reboot tally so the final summary covers the whole run.
     Restore-DevConfigTally -Path (Join-Path $PSScriptRoot 'devconfig-tally.json')
 }
-Write-Host ''
-if ($Script:DevConfigResumed) {
-    Write-Host 'Welcome back. Resuming Calm OS setup after the reboot...' -ForegroundColor Cyan
-} else {
-    Write-Host 'Calm OS setup -- 11 phases, one reboot along the way (expected, not an error)' -ForegroundColor Cyan
-}
-
 # WSL stays last so its required reboot happens after other phases.
 $phases = @(
-    @{ File = 'prerequisites.ps1';           Function = 'Invoke-PrerequisitesPhase';          Title = 'Getting ready' }
-    @{ File = 'packages.ps1';               Function = 'Invoke-PackagesPhase';               Title = 'Packages' }
-    @{ File = 'registry-system.ps1';         Function = 'Invoke-RegistrySystemPhase';         Title = 'System settings' }
-    @{ File = 'registry-explorer.ps1';       Function = 'Invoke-RegistryExplorerPhase';       Title = 'File Explorer tweaks' }
-    @{ File = 'registry-taskbar-search.ps1'; Function = 'Invoke-RegistryTaskbarSearchPhase';  Title = 'Taskbar, search & start tweaks' }
-    @{ File = 'edge.ps1';                    Function = 'Invoke-EdgePhase';                   Title = 'Microsoft Edge tweaks' }
-    @{ File = 'fonts.ps1';                   Function = 'Invoke-FontsPhase';                  Title = 'Fonts' }
-    @{ File = 'terminal.ps1';                Function = 'Invoke-TerminalPhase';               Title = 'Windows Terminal' }
-    @{ File = 'powershell-profile.ps1';      Function = 'Invoke-PowerShellProfilePhase';      Title = 'PowerShell profile' }
-    @{ File = 'copilot.ps1';                 Function = 'Invoke-CopilotPhase';                Title = 'GitHub Copilot' }
-    @{ File = 'wsl.ps1';                     Function = 'Invoke-WslPhase';                    Title = 'WSL + Ubuntu' }
+    @{
+        File     = 'prerequisites.ps1'
+        Function = 'Invoke-PrerequisitesPhase'
+        Title    = 'Getting ready'
+    }
+    @{
+        File      = 'packages.ps1'
+        Function  = 'Invoke-PackagesPhase'
+        Title     = 'Packages'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-system.ps1'
+        Function  = 'Invoke-RegistrySystemPhase'
+        Title     = 'System settings'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-explorer.ps1'
+        Function  = 'Invoke-RegistryExplorerPhase'
+        Title     = 'File Explorer tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-taskbar-search.ps1'
+        Function  = 'Invoke-RegistryTaskbarSearchPhase'
+        Title     = 'Taskbar, search & start tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'edge.ps1'
+        Function  = 'Invoke-EdgePhase'
+        Title     = 'Microsoft Edge tweaks'
+        Uninstall = $true
+    }
+    @{
+        File     = 'fonts.ps1'
+        Function = 'Invoke-FontsPhase'
+        Title    = 'Fonts'
+    }
+    @{
+        File      = 'terminal.ps1'
+        Function  = 'Invoke-TerminalPhase'
+        Title     = 'Windows Terminal'
+        Uninstall = $true
+    }
+    @{
+        File      = 'powershell-profile.ps1'
+        Function  = 'Invoke-PowerShellProfilePhase'
+        Title     = 'PowerShell profile'
+        Uninstall = $true
+    }
+    @{
+        File      = 'copilot.ps1'
+        Function  = 'Invoke-CopilotPhase'
+        Title     = 'GitHub Copilot'
+        Uninstall = $true
+    }
+    @{
+        File      = 'wsl.ps1'
+        Function  = 'Invoke-WslPhase'
+        Title     = 'WSL + Ubuntu'
+        Uninstall = $true
+    }
 )
+if ($Action -eq 'Partial') {
+    $phases = @($phases | Where-Object { $_.File -ne 'edge.ps1' })
+    ($phases | Where-Object { $_.File -eq 'registry-taskbar-search.ps1' }).Title = 'Taskbar & Start tweaks'
+} elseif ($Action -eq 'Uninstall') {
+    $phases = @($phases | Where-Object { $_['Uninstall'] })
+    # Remove tools after the cleanup steps that need them.
+    $phases = @($phases | Where-Object { $_.File -ne 'packages.ps1' }) +
+        @($phases | Where-Object { $_.File -eq 'packages.ps1' })
+}
+
+$operation = if ($Action -eq 'Uninstall') { 'cleanup' } else { 'setup' }
+Write-Host ''
+if ($Action -eq 'Uninstall') {
+    Write-Host 'Calm OS cleanup -- resetting settings and removing developer tools' -ForegroundColor Cyan
+    Write-Host 'Ubuntu and its files will be deleted. Targeted tools are removed even if they predate setup.' -ForegroundColor Yellow
+    Write-Host 'Some uninstallers may request Administrator approval.' -ForegroundColor DarkGray
+} elseif ($Script:DevConfigResumed) {
+    Write-Host "Welcome back. Resuming Calm OS setup ($Action) after the reboot..." -ForegroundColor Cyan
+} else {
+    Write-Host "Calm OS setup ($Action) -- $($phases.Count) phases, one reboot along the way (expected, not an error)" -ForegroundColor Cyan
+}
 
 $failure = $null
 try {
@@ -106,6 +206,9 @@ try {
     foreach ($phase in $phases) {
         $path = Join-Path $stepsDir $phase.File
         if (-not (Test-Path -LiteralPath $path)) {
+            if ($Action -eq 'Uninstall') {
+                throw "The cleanup script is missing: $path. Run bootstrap.ps1 -Action Uninstall to reinstall it."
+            }
             Write-Host "-- $($phase.File) not written yet, skipping" -ForegroundColor DarkGray
             continue
         }
@@ -138,7 +241,7 @@ try {
 
     Show-DevConfigSilentSkipSummary
     Write-Host ''
-    Write-Host 'Calm OS setup complete.' -ForegroundColor Green
+    Write-Host "Calm OS $operation complete." -ForegroundColor Green
     $tally = $Script:DevConfigTally
     $summaryParts = @("$($tally.Done) changed", "$($tally.AlreadyOk) already up to date")
     if ($tally.Warned -gt 0) {
@@ -150,6 +253,9 @@ try {
         Write-Host "  Flagged: $($Script:DevConfigWarnedSteps -join ', ')" -ForegroundColor Yellow
         Write-Host '  These were skipped or could not be confirmed. Running this again retries just those.' -ForegroundColor DarkGray
     }
+    if ($Action -ne 'Uninstall' -and (Get-DevConfigTerminalFontRunOnceCommand)) {
+        Write-Host '  The Terminal font will change at your next sign-in; no setup rerun is needed.' -ForegroundColor DarkGray
+    }
     Write-Host '  A few Explorer and taskbar changes appear once you sign out and back in.' -ForegroundColor DarkGray
 } catch {
     $failure = $_
@@ -157,7 +263,7 @@ try {
 
 if ($failure) {
     Write-Host ''
-    Write-Host 'Calm OS setup stopped early.' -ForegroundColor Red
+    Write-Host "Calm OS $operation stopped early." -ForegroundColor Red
     Write-Host "  $($failure.Exception.Message)" -ForegroundColor Red
     $origin = $failure.InvocationInfo
     if ($origin -and $origin.ScriptName) {
@@ -171,13 +277,13 @@ if ($logPath) {
     Write-Host "  Full log: $logPath" -ForegroundColor DarkGray
 }
 
-# Release the run lock before the final pause so a completed run does not block the next start.
+# Close the log before releasing the lock so another run can start while this window waits.
+Stop-DevConfigLog
 Exit-DevConfigSingleInstance
 
 # The elevated window owns the final pause on both the initial and resumed runs.
 Wait-DevConfigKeyPress
 
-Stop-DevConfigLog
 if ($failure) {
     exit 1
 }
