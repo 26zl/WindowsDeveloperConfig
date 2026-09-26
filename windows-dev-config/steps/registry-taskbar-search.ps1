@@ -10,22 +10,81 @@ function Invoke-RegistryTaskbarSearchPhase {
     $advanced = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
 
     $tweaks = @(
-        @{ Name = 'DoNotDisturb';          KeyPath = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'; ValueName = 'NOC_GLOBAL_SETTING_TOASTS_ENABLED'; Value = 0; Description = 'Enable Do Not Disturb (disable all notifications)' }
-        @{ Name = 'BluetoothOff';           KeyPath = 'HKCU\Control Panel\Bluetooth';                                        ValueName = 'Notification Area Icon';              Value = 0; Description = 'Hide Bluetooth icon in taskbar notification area' }
-        @{ Name = 'EndTask';                KeyPath = "$advanced\TaskbarDeveloperSettings";                                   ValueName = 'TaskbarEndTask';                      Value = 1; Description = 'Enable "End Task" on right-click of taskbar icons' }
-        @{ Name = 'WebSearchOff';           KeyPath = 'HKCU\SOFTWARE\Policies\Microsoft\Windows\Explorer';                    ValueName = 'DisableSearchBoxSuggestions';         Value = 1; Description = 'Disable web search in Start/Search' }
-        @{ Name = 'SearchHighlightOff';     KeyPath = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\SearchSettings';        ValueName = 'IsDynamicSearchBoxEnabled';           Value = 0; Description = 'Disable Show search highlights' }
-        @{ Name = 'StartRecommendations';   KeyPath = $advanced;                                                              ValueName = 'Start_IrisRecommendations';           Value = 0; Description = 'Disable Start menu recommendations' }
-        # Widgets are configured at OS policy level because the direct taskbar icon key is blocked on 24H2+.
-        @{ Name = 'WidgetServiceOff';       KeyPath = 'HKLM\SOFTWARE\Policies\Microsoft\Dsh';                                 ValueName = 'AllowNewsAndInterests';               Value = 0; Description = 'Disable Widget service' }
+        @{
+            Name        = 'DoNotDisturb'
+            KeyPath     = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'
+            ValueName   = 'NOC_GLOBAL_SETTING_TOASTS_ENABLED'
+            Value       = 0
+            Description = 'Enable Do Not Disturb (disable all notifications)'
+        }
+        @{
+            Name        = 'BluetoothOff'
+            KeyPath     = 'HKCU\Control Panel\Bluetooth'
+            ValueName   = 'Notification Area Icon'
+            Value       = 0
+            Description = 'Hide Bluetooth icon in taskbar notification area'
+        }
+        @{
+            Name        = 'EndTask'
+            KeyPath     = "$advanced\TaskbarDeveloperSettings"
+            ValueName   = 'TaskbarEndTask'
+            Value       = 1
+            Description = 'Enable "End Task" on right-click of taskbar icons'
+        }
+        @{
+            Name        = 'WebSearchOff'
+            KeyPath     = 'HKCU\SOFTWARE\Policies\Microsoft\Windows\Explorer'
+            ValueName   = 'DisableSearchBoxSuggestions'
+            Value       = 1
+            Description = 'Disable web search in Start/Search'
+        }
+        @{
+            Name        = 'SearchHighlightOff'
+            KeyPath     = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\SearchSettings'
+            ValueName   = 'IsDynamicSearchBoxEnabled'
+            Value       = 0
+            Description = 'Disable Show search highlights'
+        }
+        @{
+            Name        = 'StartRecommendations'
+            KeyPath     = $advanced
+            ValueName   = 'Start_IrisRecommendations'
+            Value       = 0
+            Description = 'Disable Start menu recommendations'
+        }
+        @{
+            Name        = 'StartAccountNotifications'
+            KeyPath     = $advanced
+            ValueName   = 'Start_AccountNotifications'
+            Value       = 0
+            Description = 'Disable Start menu account notifications'
+        }
+        # Windows may protect the Widgets policy even from an administrator.
+        @{
+            Name        = 'WidgetServiceOff'
+            KeyPath     = 'HKLM\SOFTWARE\Policies\Microsoft\Dsh'
+            ValueName   = 'AllowNewsAndInterests'
+            Value       = 0
+            Description = 'Disable Widgets'
+            BestEffort  = $true
+        }
     )
 
-    # ArgumentList binds each tweak's values at call time instead of closure capture.
+    if ($Script:DevConfigAction -eq 'Partial') {
+        $tweaks = @($tweaks | Where-Object { $_.Name -in @('EndTask', 'StartRecommendations', 'StartAccountNotifications') })
+    }
+
     $steps = foreach ($tweak in $tweaks) {
-        New-DevConfigStep -Name $tweak.Name -Description $tweak.Description `
-            -Check { param($KeyPath, $ValueName, $Value) Test-DevConfigRegistryValue -KeyPath $KeyPath -ValueName $ValueName -Value $Value } `
-            -Apply { param($KeyPath, $ValueName, $Value) Set-DevConfigRegistryValue -KeyPath $KeyPath -ValueName $ValueName -Value $Value } `
-            -ArgumentList @($tweak.KeyPath, $tweak.ValueName, $tweak.Value)
+        New-DevConfigRegistryStep -Setting $tweak -Reset:($Script:DevConfigAction -eq 'Uninstall')
+    }
+    if ($Script:DevConfigAction -eq 'Uninstall') {
+        $steps += New-DevConfigRegistryStep -Reset -Setting @{
+            Name       = 'QuietHoursProfile'
+            KeyPath    = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\QuietHours\Profiles'
+            ValueName  = 'DefaultProfile'
+            Type       = 'String'
+            ResetValue = 'Microsoft.QuietHoursProfile.Unrestricted'
+        }
     }
 
     Invoke-DevConfigSteps -Steps $steps
@@ -34,8 +93,8 @@ function Invoke-RegistryTaskbarSearchPhase {
 # SIG # Begin signature block
 # MIInQQYJKoZIhvcNAQcCoIInMjCCJy4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDiYOh4rsn+MYMt
-# 6wT6H+P0sW+7npQ3yXycliQ1jG2RDqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAkQO8J+tWC0sMi
+# +WMR9QVDAkKhywm8UMvV9aNxJPRHtKCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -107,62 +166,62 @@ function Invoke-RegistryTaskbarSearchPhase {
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEII+bV+V5WlSM3jMZR58vwkekRtzD81Ir1AwnwWj9ft9eMEIG
+# KoZIhvcNAQkEMSIEIDmTLiB4uS+TVneMdCunP64FDpGavKE2F1m+MfPMNOFYMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAVLd/Zk58qSDvzqWz
-# HFsR+jYVN4LR3WAPszpIj9CRZFm85YUrEA4m7w3ywQcqnVjIDAOT3vKiULBW05IV
-# Twwv8NvnFc1t7g5bI0JDRLt+DllVXvpI1iGM5ijADcHRGAj4tW9bTa2q7drh8dNM
-# By76ok4UfKMGVS5uOkWsp5e9vkZ+1pts8F94Q/YqkUdH1BbNXs4qDdbvL/q8oT12
-# 4S/TwmXJ2JyySdfiQySVbw7mraV/TKpmK3/BNYcAtZbBd8sSHdMJHkJAXNf4yVy3
-# vXUPst8Mj+dsQKvbb0eigcFCtI1ADL8DgJrIOkFJD1B5LfCPnS52sLwSxD8qLpzj
-# eYY2g6GCF60wghepBgorBgEEAYI3AwMBMYIXmTCCF5UGCSqGSIb3DQEHAqCCF4Yw
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAJif+CP3kP2wvuU7a
+# 7QYZ3C1asq88XqbR6qxHv15SyPI/GLwIq+r5rxzH5sPHj3TCfkRSi3Xtn+eoJ6x+
+# VVkOLNzS/viLIDUTqTkRPFc0a0H0SOQ6H89MB3cFaVa8duQg25GWQtUgczh5g1Kz
+# IPTQ7AG1fO1PuZLy/+whoU18zt9UbqH4+VqidyrJqHVU24x8G3uKbtCtIbqea5x6
+# Mihb7PXJi0P7HKDAb6uDFZtoJv5ZDoxIRzXOJXNcmyLhnwdCbOxSLH8Sltt5xfwT
+# VJ0SJdNndtiP+hHgKEzTymGhae95jJrvrrFg4TosnKr+HUym+nkvgsYXmszxm08c
+# wdk2zaGCF60wghepBgorBgEEAYI3AwMBMYIXmTCCF5UGCSqGSIb3DQEHAqCCF4Yw
 # gheCAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCD166YpALGUWTBY
-# BpsgrfAfdJMefJ6AnteriJ5dGBsXugIGaoii8EJlGBMyMDI2MDkxODE2MTEzOC4y
-# NDNaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDwgYb7ZFYtsHYg
+# 79yvESz1oPpAhNS3kY55erN8JcOXMgIGaq8lHAg5GBMyMDI2MDkyNTIyNDc1Ni4w
+# MjJaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjoyRDFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo1NTFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEfswggcoMIIF
-# EKADAgECAhMzAAACEtEIBjzKGE+qAAEAAAISMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
+# EKADAgECAhMzAAACG9CyuAJn93LPAAEAAAIbMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
 # BgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25k
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jv
-# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgxNVoXDTI2MTEx
-# MzE4NDgxNVowgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
+# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgzMFoXDTI2MTEx
+# MzE4NDgzMFowgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
 # DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # LTArBgNVBAsTJE1pY3Jvc29mdCBJcmVsYW5kIE9wZXJhdGlvbnMgTGltaXRlZDEn
-# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjJEMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
+# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjU1MUEtMDVFMC1EOTQ3MSUwIwYDVQQD
 # ExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEF
-# AAOCAg8AMIICCgKCAgEAr0zToDkpWQtsZekS0cV0quDdKSTGkovvBaZH0OAIEi0O
-# 3CcO77JiX8c4Epq9uibHVZZ1W/LoufE172vkRXO+QYNtWWorECJ2AcZQ10bpAltk
-# hZNiXlVJ8L3QzhKgrXrmMkm2J+/g81U23JPcO4wXHEftonT3wpd//936rjmwxMm7
-# NkbsygbJf+4AVBMNr4aMPQhBd76od0KMB6WrvyEGOOU0893OFufS5EDey4n44Wga
-# xJE0Vnv3/OOvuOw5Kp1KPqjjYJ+L9ywLuBMtcDfLpNQO/h1eFEoMrbiEM67TOfNl
-# XfxbDz4MlsYvLioxgd2Xzey1QxrV1+i+JyVDJMiSe9gKOuzpiQQFE19DUPgsidyj
-# LTzXEhSVLBlRor0eCVf7gC6Rfk8NY3rO2sggOL79vU5FuDKTh/sIOtcUHeHC42jB
-# GB+tfdKC1KOBR+UlN9aOzg8mpUNI2FgqQvirVP9ppbeMUfvp2wA9voyTiRWvDgzC
-# xo8xlJ1nscYTHIQrmkF9j/Ca0IDmt8fvOn64nnlJOGUYZYHMC1l0xtgkYTE1ESUq
-# qkawKk7iqbxdnLyycS+dR+zaxPudMDLrQFz8lgfy9obk0D8HC2dzhWpYNn5hdkoP
-# EzgCqQUOp8v3Qj/sd4anyupe5KoCkjABOP3yhSQ4W9Z+DrJnhM/rbsXC7oTv26cC
-# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBRSBblSxb5cYKYOwvd/VfoXOfu33jAfBgNV
+# AAOCAg8AMIICCgKCAgEAjsWd52ZZkzB5Xe5g/l2GsOjAz30sg6jVxfFJV+w4xIDV
+# yaI3LO8bIpmzYul3AZHg50UIQ8PrSRZGpQqFkRNu+o3YKJ4g2uGYBRksHnHYR0uV
+# SCQg58ThkYyeplGX3oAvGRVuPIpQtAiTsR76A/gdoU7HDwEbb73bJwTyrbKHhR+W
+# aMy9DQHI4k5Qo4+bZDs0kj76bvhJvdGU+S8zxQBp7UAhjJnFqKxIusSITE7zCCR4
+# 22ELhkhVVOFqK2w6h1MAvILe76hxRIcPj0SBL2r8O9tx5njU4+tg2rAdU153pmyh
+# qazdpUccYBE9wDRFUd/e9CoWx7TdnUicB+Mai7RT6qse7e5aGqX1B7bnj/ZHvrrf
+# F+BJEIlS9iDXAUgekvXZ+FZmjvLwP+dN+0/crh++r4e8FknF7EX6IJfnmNeDN/68
+# Z59kbaJ1f+P5mnKYfydCeZmxrGpS0taWkDk36D3jPVZflvxrc+1rhCIlM5v9agLE
+# FI12QiBTfpOBOBr3AGCPk+eH0+latjQajug+2/BD12qb82500LQytUWT2ota/HYn
+# RgSv1jvZ0/dml1FsxWYzOnCrjfdB/7N6pNySt4vn+PGN6dFLim7kxos+B9WfQPez
+# Ji3fuKyyDAB9zSHPj1Zu8nZfecZJ9um4zj7DFgvJXTDTnG5qlG4ZdbFRa/rrfzkC
+# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBS2vp93/lxLppNK8OkauJ2AvNmIUDAfBgNV
 # HSMEGDAWgBSfpxVdAF5iXYP05dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5o
 # dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBU
 # aW1lLVN0YW1wJTIwUENBJTIwMjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwG
 # CCsGAQUFBzAChlBodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRz
 # L01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNV
 # HRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIH
-# gDANBgkqhkiG9w0BAQsFAAOCAgEAXnSAkmX79Rc7lxS1wOozXJ7V0ou5DntVcOJp
-# lIkDjvEN8BIQph4U+gSOLZuVReP/z9YdUiUkcPwL1PM245/kEX1EegpxNc8HDA6h
-# KCHg0ALNEcuxnGOlgKLokXfUer1D5hiW8PABM9R+neiteTgPaaRlJFvGTYvotc0u
-# qGiES5hMQhL8RNFhpS9RcIWHtnQGEnrdOUvCAhs4FeViawcmLTKv+1870c/MeTHi
-# 0QDdeR+7/Wg4qhkJ2k1iEHJdmYf8rIV0NRBZcdRTTdHee35SXP5neNCfAkjDIuZy
-# cRud6jzPLCNLiNYzGXBswzJygj4EeSORT7wMvaFuKeRAXoXC3wwYvgIsI1zn3DGY
-# 625Y+yZSi8UNSNHuri36Zv9a+Q4vJwDpYK36S0TB2pf7xLiiH32nk7YK73Rg98W6
-# fZ2INuzYzZ7Ghgvfffkj4EUXg1E0EffY1pEqkbpDTP7h/DBqtzoPXsyw2MUh+7yv
-# Wcq2BGZSuca6CY6X4ioMuc5PWpsmvOOli7ARNA7Ab8kKdCc2gNDLacglsweZEc9/
-# VQB6hls/b6Kk32nkwuHExKlaeoSVrKB5U9xlp1+c8J/7GJj4Rw7AiQ8tcp+WmfyD
-# 8KxX2QlKbDi4SUjnglv4617R8+a/cDWJyaMt8279Wn7f2yMedN7kfGIQ5SZj66Rd
-# hdlZOq8wggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
+# gDANBgkqhkiG9w0BAQsFAAOCAgEAZkU1XxQD4OTM3GTht32TXShIfPBoMfSsFsBQ
+# qFOZqLJOxyJOllIBFpmpvOtGNPkC5Z8ldG8aCpvgFNo/jDWeT5FiW53dAj9KnZxp
+# sQ3Pf5fRzSGHRcxEMOdXIVzDJwcZUX0cjfxna7ydNv8eXB/Xk6G6SyrR2OH6S1LH
+# MW11m3UvKF+eLjIPl45rximuDCoEd+ad0lOAXA5/vZOKN5n/ePYeP0LRchZX0Q6H
+# 8n/ZmSPMlbli3MO851Q09RmT/ZGHa+/Fdy+WLDrwcYykV9mUy/4TbwKw6FtdR6ZP
+# HxMdIi1pk8Y2mC/GzCq0LCsH0uTFeQ6Q7Nc3MRmER/3mLWUhbaWHgX1FbYchvR22
+# b+Bup+YPR5Q/0BhaaAN6AIBfcGs+u/nJoIByyZKA8cTyCmnUI/4vW6D4vywg3XBF
+# f4f2DwFHy/evsC+58KMl+k2wa05X2kK0T/bCPLhaov9ZXyobawfNOLYGiauKT2FW
+# vbwZzHIFCTxjBww6Pt5uRvCE/jnUcf/xhlOGMn6iKO9Xt49vZTE2SfIBk/34iLTR
+# BJ6H7aGPTTQnza3OfWu1/dRycC6Wl5ons3PjnGXTSKSxXllJPmg6R/ulGonP/UCY
+# oJ6mN+EXjfyDLPXLqsr91+VTG1rYzRCjPwBFAHv4EIwaE0ajCrf75eUGI3+oXU0U
+# P6rloZ8wggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
 # DQEBCwUAMIGIMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
 # A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIw
 # MAYDVQQDEylNaWNyb3NvZnQgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAx
@@ -205,41 +264,41 @@ function Invoke-RegistryTaskbarSearchPhase {
 # Aj4CAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjoyRDFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo1NTFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaIjCgEBMAcGBSsO
-# AwIaAxUA5VHBr4h00EN7jUdQ33SE+qbk/8CggYMwgYCkfjB8MQswCQYDVQQGEwJV
+# AwIaAxUAhoV6r49M4GBd41K1RYB1Z0f4zuCggYMwgYCkfjB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5XX6swIhgPMjAyNjA5
-# MTgwNjU4NTFaGA8yMDI2MDkxOTA2NTg1MVowdDA6BgorBgEEAYRZCgQBMSwwKjAK
-# AgUA7ldfqwIBADAHAgEAAgIaWzAHAgEAAgISojAKAgUA7lixKwIBADA2BgorBgEE
+# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5g4yowIhgPMjAyNjA5
+# MjUxMjEwMThaGA8yMDI2MDkyNjEyMTAxOFowdDA6BgorBgEEAYRZCgQBMSwwKjAK
+# AgUA7mDjKgIBADAHAgEAAgIQxzAHAgEAAgIZxjAKAgUA7mI0qgIBADA2BgorBgEE
 # AYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAIDAYag
-# MA0GCSqGSIb3DQEBCwUAA4IBAQAsVFxiq4FKKDgCNuXGaGY09Q6JGa83AO/gt1RX
-# A54G1KfELP8p2xSwTFSihJabho2Fh0jzgSnq7hNWQVMtIhP/8cqNvC69hBB/XlGT
-# puV+UMpQm979lOw9RfrUyRdKvDzo3xlFmkSYbxeTu2YZXPV3CBuVQX0AjG+oxPe/
-# AelPBLSacaLGCfsTCPvluH63p1XuI263COgVz97JIdQc6wd+wnfpz5Ju4EC8XzYH
-# KrN5XdG/Vlvo99AYxeEH+odtdsrgV6Dj0Hl32OfjgBz8D6ifTaV3p3wCJSb+ofHw
-# uF6aUbf0w98lsr97dKQ3r5k0syiuQyAluWLxwYgUAuDcJoZUMYIEDTCCBAkCAQEw
+# MA0GCSqGSIb3DQEBCwUAA4IBAQAmwgY8V8rLlU/+qAQcOj3XFSmaor4jj4rS3vfL
+# p1WhsQqj7pcRgmX916f/MrdxtEf0UZ7mGEY3kskaHXHif5Bwf8kgFbM/TJpP+CIO
+# XpcoVDFgklycc3ZNVCrBW3Lmc1szglSSbvO0JcCtGTN4p3ck5MTbWD1HEsxYiHmW
+# qCyPVpRWO2M13337ZeDhnbGqoBC4pAb+6qTsQCFkUjyn4SjeP7KpiDF8AinRO0Pj
+# /982rBadFTNVm5c3ezUAox4qxHNBP7tRhgP1H/vZYO3y75pIwaGrbG/eOEtKjm+y
+# OeOJoKHHprMUNqrt5POdXu37I9RPkn3koCcvYShvHhmys19fMYIEDTCCBAkCAQEw
 # gZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
 # B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
-# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIS0QgGPMoYT6oA
-# AQAAAhIwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0B
-# CRABBDAvBgkqhkiG9w0BCQQxIgQghUp0FBWcCskDL7v+MXPRYdMuFN0ZFYyOXOvu
-# WaEG0oYwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCBz+X5GvO7WngknH4BZ
-# eYU+BzBL1Jy5oJ8wVlTNIxfYgzCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYD
+# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIb0LK4Amf3cs8A
+# AQAAAhswDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0B
+# CRABBDAvBgkqhkiG9w0BCQQxIgQgKeRdBDLtLkh3tCtaTCYqfRaFjoDKJxkHQimj
+# B3YmhGwwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCAwJRSVuD2jmMcQCFXd
+# LuJAwDpUVNZ6bc6dfJU83Q2LgDCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYD
 # VQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNy
 # b3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1w
-# IFBDQSAyMDEwAhMzAAACEtEIBjzKGE+qAAEAAAISMCIEILbEQ1OrKtOJqxgZ2cr+
-# GNPt3kX2UZ7COuJnRZWPfHYQMA0GCSqGSIb3DQEBCwUABIICAIBvwfbHs3QyIA58
-# UO56XnQOLdm3trHlmSIOQ/hf6xcppPy6eTa0ut2qVrECyo8tiIRRjebNv2JuPOH8
-# ZW0B51tNiFBNxYUGGahTzvsxglSroK9EJj+HRS4ACprtRnY3szYsFpSg8apOUI3l
-# mhgOGbsaJPzGo+MPiTVr/NT7KstZ6ZKTzXloyUQaPRYge+49SxHbM+KQ2Qnt2X8r
-# QwnQk4mmiaYPTcSF/jEawvet0KNo6YzTSZgpmkOOwGgjdvhfiBWz/mEtj759Ytfx
-# MpT25pOYMw8vPtkYvOSC4gfQAn+uF82GShHwITcSvWQ4zMdxMF845k0mCTES8gzS
-# vp8sB1isC2dWJhvOHe16dmezU5S7qPPj+q2k1IFetAgWYkXpVDTMX048ukRC9ldU
-# r2+Ru2no01Wl+qp5m6JNgH2QXQkBXeQNu9EAi2HxlL2XBt8+sQBa6vv1R05B79G4
-# LXpeiVR3QCXqINnKDtx5mlsQLjtfGbOmmOSh3VJSNtQsVHgzN516P2ymBhrBkXdw
-# lfyeB9k4PEP9HJj9hGjrPIOnnWdc1bU31Kk2/gwuTboMjeCZiCkuEgwTIyoug1AZ
-# kzp8zMxZuZS5qHs2A7Z+0EQA3TpyW7Qk3F0x1Xglrkq/C+YYTxQ3s9JPBcLyTtMT
-# JvMx9JMj8aVFfS5Lc6ja6yI12rdD
+# IFBDQSAyMDEwAhMzAAACG9CyuAJn93LPAAEAAAIbMCIEICSGNfPk3jtVZG3qIeOt
+# OZnXZx4VG5Iqcs2+LpMHAIIsMA0GCSqGSIb3DQEBCwUABIICACNYZwy0XsS6y7IM
+# eARQ2cjm+Vm/qcwh3xzkPgceVUbO24ADSk7RLnuGOG9Vccm0w2SJ9EBKyxKhyo3X
+# RiWQMzff48Ob0EntaSae0ou59pW/Muo6CoodeHkHjYBrUBum0SIjJWELzDyci4Dg
+# zCWijq5DURA4XU6jHwV1ooEstiEajvkHnUOK0htqQQlqNIufh8u2S4PALWkM+20x
+# rhSVznQH2UDNv0RrN4CB59podHZpA7R0zfdophr9poQkGfjkpp7C5J58KvY2l+n3
+# l1r4inCpwJUZzM2diBhrCYM4BRItOrYv6tNDlT1fgytm1uydczvSvcU+5yGMDj61
+# c1u8LAuj2xqZiB1uYuUSijXSb1Wcs46THR6WPryCDMKw8zcUXyRffbZe69GzlslG
+# yK33f1gup2vgZ5n1vcUsTQ5Di65fAaas7isvGGNSELUs4H323IeQglTV7L4EDkV2
+# uqpt4WiOhRNMfiFRybdjA/LDiZziFVO/+dG+bo/h15q9FjGjEqWA20UMiK7MPFUz
+# qKDEpyXe/re/qH8D5r8sHaEgY+jnw+QC93T/IGgVOsVuAZkH03epYRoZ0eIkjnDK
+# +Paj81sjd7ARiDw2VAp6LId9V9MqVMaBgUjBHxo78+HZVHSTQf9elFHlROEF7awm
+# 3sJShm73Wqem9Z0f3brlkjoEGGhH
 # SIG # End signature block

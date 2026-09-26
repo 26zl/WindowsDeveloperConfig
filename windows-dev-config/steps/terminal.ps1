@@ -7,15 +7,24 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $Script:DevConfigThemeKey = 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+$Script:DevConfigThemeSettings = @(
+    @{ Name = 'AppsTheme'; KeyPath = $Script:DevConfigThemeKey; ValueName = 'AppsUseLightTheme'; Value = 0; ResetValue = 1 }
+    @{ Name = 'SystemTheme'; KeyPath = $Script:DevConfigThemeKey; ValueName = 'SystemUsesLightTheme'; Value = 0; ResetValue = 1 }
+)
 
 function Test-DevConfigDarkThemeSet {
-    return (Test-DevConfigRegistryValue -KeyPath $Script:DevConfigThemeKey -ValueName 'AppsUseLightTheme'    -Value 0) -and
-           (Test-DevConfigRegistryValue -KeyPath $Script:DevConfigThemeKey -ValueName 'SystemUsesLightTheme' -Value 0)
+    foreach ($setting in $Script:DevConfigThemeSettings) {
+        if (-not (Test-DevConfigRegistryValue -KeyPath $setting.KeyPath -ValueName $setting.ValueName -Value $setting.Value)) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Set-DevConfigDarkTheme {
-    Set-DevConfigRegistryValue -KeyPath $Script:DevConfigThemeKey -ValueName 'AppsUseLightTheme'    -Value 0
-    Set-DevConfigRegistryValue -KeyPath $Script:DevConfigThemeKey -ValueName 'SystemUsesLightTheme' -Value 0
+    foreach ($setting in $Script:DevConfigThemeSettings) {
+        Set-DevConfigRegistryValue -KeyPath $setting.KeyPath -ValueName $setting.ValueName -Value $setting.Value
+    }
 }
 
 function Test-DevConfigPs7DefaultProfile {
@@ -60,6 +69,20 @@ function Set-DevConfigPs7DefaultProfile {
 }
 
 function Invoke-TerminalPhase {
+    if ($Script:DevConfigAction -eq 'Uninstall') {
+        $steps = @(
+            foreach ($setting in $Script:DevConfigThemeSettings) {
+                New-DevConfigRegistryStep -Setting $setting -Reset
+            }
+            New-DevConfigStep -Name 'TerminalReset' -Description 'Remove Terminal defaults and PowerShell, Copilot, and Ubuntu profiles' -BestEffort `
+                -Check { param($DistributionName) Reset-DevConfigTerminal -DistributionName $DistributionName -CheckOnly } `
+                -Apply { param($DistributionName) Reset-DevConfigTerminal -DistributionName $DistributionName } `
+                -ArgumentList @($Script:DevConfigWslDistributionName)
+        )
+        Invoke-DevConfigSteps -Steps $steps
+        return
+    }
+
     # These user preferences are best-effort so later setup phases can continue.
     $steps = @(
         New-DevConfigStep -Name 'DarkTheme' -Description 'Force dark app/system theme' -BestEffort `
@@ -74,10 +97,10 @@ function Invoke-TerminalPhase {
 }
 
 # SIG # Begin signature block
-# MIInQQYJKoZIhvcNAQcCoIInMjCCJy4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIInRAYJKoZIhvcNAQcCoIInNTCCJzECAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDRRzGVHva2XEs1
-# LdyE8EGyexBdDUagmWwoE2pBOACqfKCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBZhUkjewpLCplm
+# vGoEeNmxZlVNILWsKKrmvmaAJ4G5k6CCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -145,27 +168,27 @@ function Invoke-TerminalPhase {
 # vZGtqa9FSL2RazArA+rDPuf6JGYz4HpgMZHB4S6szWSKYBv0VisCzfxgeU+dquXW
 # 9bd0auYlOB58DPcOYKdc3Se94g+xL4pcEhbB54JOgAkwYTu/9dLeH2pDqeJZAABV
 # DWRQCaXfO5LgyKwKCLYXpigrZYCjUSBcr+Ve8PFWMhVTQl0v4q8J/AUmQN5W4n10
-# 1cY2L4A7GTQG1h32HHAvfQESWP0xghndMIIZ2QIBATBuMFcxCzAJBgNVBAYTAlVT
+# 1cY2L4A7GTQG1h32HHAvfQESWP0xghngMIIZ3AIBATBuMFcxCzAJBgNVBAYTAlVT
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIO+o1CDUwi4iwO4LHfgqntVlmksLqhL4KRVhHBsmAspIMEIG
+# KoZIhvcNAQkEMSIEIC3yCEQlMmSt7LEDPs6dfzEhWffXA9lJeiQqWgFNnhM9MEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEARvg1ZH/J98htqYth
-# +b8D55F/LfBTX6saVeSJQY81PJF8CiSsfmdIHstGSl796FQ0+8HLpxZWMjys9drR
-# dyuQsPXSJkh/0YNwiowm7MZEOpr0eCzWEAzIlyqhdFBHMJzgiUo6z4O/iSn7/swy
-# VnLGkBuLwi1iSpxUDx5pkt+UrP9OBLtZG/uH6IEZbZw5L6atZ6IKMz53GMoxOy7G
-# xTqerfb87o3nvBRem+Z7GPCwikvzIcSH6DZZqjmJxXUX8fcxSHwf4ZajDoDREWCI
-# cggh0qmLGEOhwkP8wL1sF+bAeGW+aqH6f3bYhxx4Hm6r+iApMayQcIBwRBl1N4km
-# g3gAVqGCF60wghepBgorBgEEAYI3AwMBMYIXmTCCF5UGCSqGSIb3DQEHAqCCF4Yw
-# gheCAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCBngpxBDKy1Kr5E
-# igwIZ4HDIIW4BE7Hm4ts1nNuyREx6gIGaoj2F2wCGBMyMDI2MDkxODE2MTMwNy45
-# NzRaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAnHisnUZZCk3YvUey
+# jcvxA16oKv7FMbITdDujtgjioNHxv+JT/L4l2/3wR5EI+ho2SEWF0OCDxg0Wg7+y
+# n8v205xBLirYrDMo/Z0ArjrQQtYU4mNAOTL/RJaapEe/9k3MuGvjA9XXWfHwnNk+
+# kgpFb4kw1ccvl2er6ouFY8y7LvDdP8tbi3gH7QbWvHyMzuJ/B4VvwsFjAAvII0/w
+# mhz8mJQTnfMLUCQV0q7Jf/MzLyIajHfYt1NsRT1Sx6ZfkWaNL89eLoOXdUjQZv8w
+# QYEtWUdi+o1IE8t9i4dpfrjmsTRexgp1u3CC3zFeNI75YCJbGmErPP6uS+YK7Arq
+# Ned2PKGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
+# gheFAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAb1QGewcwu4FQt
+# YtLbwfr2cppmCOkd7fGRBUSLkqkaYAIGaq5gawJRGBMyMDI2MDkyNTIyNDc1NS4z
+# NzZaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
 # bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0QzFBLTA1RTAtRDk0NzEl
-# MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEfswggcoMIIF
+# MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEf4wggcoMIIF
 # EKADAgECAhMzAAACGCXZkgXi5+XkAAEAAAIYMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
 # BgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25k
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jv
@@ -243,8 +266,8 @@ function Invoke-TerminalPhase {
 # JLo4S5pu+yFUa2pFEUep8beuyOiJXk+d0tBMdrVXVAmxaQFEfnyhYWxz/gq77EFm
 # PWn9y8FBSX5+k77L+DvktxW/tM4+pTFRhLy/AsGConsXHRWJjXD+57XQKBqJC482
 # 2rpM+Zv/Cuk0+CQ1ZyvgDbjmjJnW4SLq8CdCPSWU5nR0W2rRnj7tfqAxM328y+l7
-# vzhwRNGQ8cirOoo6CGJ/2XBjU02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDVjCC
-# Aj4CAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# vzhwRNGQ8cirOoo6CGJ/2XBjU02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDWTCC
+# AkECAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
 # bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0QzFBLTA1RTAtRDk0NzEl
@@ -252,36 +275,36 @@ function Invoke-TerminalPhase {
 # AwIaAxUAnWtGrXWiuNE8QrKfm4CtGr57z+mggYMwgYCkfjB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5XsugwIhgPMjAyNjA5
-# MTgxMjU0MDBaGA8yMDI2MDkxOTEyNTQwMFowdDA6BgorBgEEAYRZCgQBMSwwKjAK
-# AgUA7ley6AIBADAHAgEAAgIwqTAHAgEAAgIUozAKAgUA7lkEaAIBADA2BgorBgEE
-# AYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAIDAYag
-# MA0GCSqGSIb3DQEBCwUAA4IBAQBJlK7I9EAfc64IKPSy5WnhZruY2O1XYwdlrwJL
-# Z58B6be5uo2RFKbN5XhMa9H3cGLlt9jCvYp+ipcugLxW2OBzEQ30rJ7oV1LArhki
-# lGTe2MreIHugRigeOKDNCWOLTkBpaHD8hVChcxxSbmKntvVywrTXK4ydYkd1a1F7
-# s17W+bev5EeO8RaW3y3IbqD2eJuLze0uMgEdjGyD6E5nA2TUFMhZ4KipSdYCORkl
-# jokhOJ6Lsl4+0gH8eH+jus+CT2dulg70aU1cKkXECig1MzI+Esr24hr2vJOn6ynU
-# uGb7Jt4aPI4GEdpHQlVb0EFCoVIrZIVaQVuY3yEU8IWh+fS1MYIEDTCCBAkCAQEw
-# gZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
-# B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
-# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIYJdmSBeLn5eQA
-# AQAAAhgwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0B
-# CRABBDAvBgkqhkiG9w0BCQQxIgQgP8SWC7mQLadRRIudtiplZKniq0WHt+3cisSh
-# MZ0AsFIwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCZE9yJuOTItIwWaES6
-# lzGKK1XcSoz1ynRzaOVzx9eFajCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYD
-# VQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNy
-# b3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1w
-# IFBDQSAyMDEwAhMzAAACGCXZkgXi5+XkAAEAAAIYMCIEIA1Zz21nj2RiL3ZhAWDZ
-# baukglv84FqdZ/5Dol1pqy1fMA0GCSqGSIb3DQEBCwUABIICAHGyYnr+7WVk3Vks
-# XS81GuZGhY9V+boe0hYiXUiYZbucVINIYnOe1vShm2RS0vH2txedIpOoj4/emCPX
-# S3bV7OlRA/NSYobrA1aRMIyJGEomjE+7cOBLXE+i0yVR8Y/XBpP4YQ2tyhXUK/IS
-# l162Nk4WNwLCNoXoYH6KOotsyafTCEdo8giw520FQToZoeLILf0qAcxO62Lbgsm4
-# Ptze+cjcWJM6mlAPKPXFnNlda+QzkJrPIkLIzRE/h8KvIhUZM23tmlIbchmBWFQk
-# dEb0yGxpTqPv9bs2fRy9VSvSHwfyaS6ulvynnkrLExzyuzpid/IoGLO0X7dCNrVu
-# BWKtFJldvZnYb++k/Karn9sh37FiBr32sl8vUsG7qUk3PhPgrrKw9MXwlO1bc95E
-# V0t/SkiWk9db/B6uk20QPiU+zznDf35fAHquxo9wAo6SLiFF3WFbwkgBJZrpVhRK
-# 1rZrzECr4f1CVJbGXaNki9Fo2WIjeSBs8tT+uxGLmo5PmP8du2ylzNtXHCdMHZkQ
-# 0V7ygp+5F/SvarHecvT83vXM+LtGjpLQ4lBRcoQw4BqdfPufcEcKFF6XdcJAGE2c
-# BFyLdf0aU9zn1N62XGn01VivVanut7uLoyRqOqDNz9SBFjBRPArI3VtDYEa7cAAz
-# GsYFd3tRB/nO54pzC14z4mu+1Wf5
+# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5hb/kwIhgPMjAyNjA5
+# MjUyMjExMDVaGA8yMDI2MDkyNjIyMTEwNVowdzA9BgorBgEEAYRZCgQBMS8wLTAK
+# AgUA7mFv+QIBADAKAgEAAgIU9AIB/zAHAgEAAgIcPTAKAgUA7mLBeQIBADA2Bgor
+# BgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAID
+# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQAeo4hcBkDHJvMqnXMBPQa9Yk9gxdpiG722
+# TrK829CA+jmOSrw7n/rUoAv6kBvPRFTuGQQLU3RNXUvHKYUfTMFdZwz943MSY24M
+# cEjZkqGEnEA1cIWJioY+L+ykw6h/7tGCMhsnKx9gvfU94HE52RBOFRgruZ7ZMPnx
+# pof9SXmBzPh0n55gcZTTe7bWtghutbuTwRcIrC0yrLZ7ZC4JWJRCAlBEh2axSSsi
+# AcUDqtXIeyu0FYID2UQeIeTjw13Iuoqcg5bFcCpJusPXsc4essdEA5hZ5if98I/u
+# 56K9m9E3BV79ibDdtTalQobtqym8CfNtnhekCK99GZw913SE3u4wMYIEDTCCBAkC
+# AQEwgZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNV
+# BAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQG
+# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIYJdmSBeLn
+# 5eQAAQAAAhgwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
+# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgUNNJHJpXVzia+78P+zGUGytZunT7rXYg
+# fzaBBmhzxk0wgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCZE9yJuOTItIwW
+# aES6lzGKK1XcSoz1ynRzaOVzx9eFajCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
+# EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
+# aWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0
+# YW1wIFBDQSAyMDEwAhMzAAACGCXZkgXi5+XkAAEAAAIYMCIEILSWr2K7u3iGEqAe
+# owrZ5NRbyn0zTVL5I0fnbvc2KtvvMA0GCSqGSIb3DQEBCwUABIICAIjuMWCc1YED
+# /o5vCVheHW3nDrvQVn0BmaRlsKXnpgHOa6w7bDEbxJP6Q88Y9Yyl2yg6at8d1e0z
+# C6JKFdS8au7SENiJTLmYbGr3PDONJoI9SWqWeyEvdsSMrUOaruBM4lPwc/A9Di9t
+# alu8YL8W/Nkn46yEyMa2X34XtdAQ2gBqx93Jf+Vut98BAUX0DIA0W20DfQo+bcY4
+# WqiRkNYZTW+wfio8RKGnKJytuA2CVvBFmJCZWXXf7mdUSX0tiQlQ4TEe+RUA48DN
+# BdhjoLbt3NXPtD3buJkB4Yahcry9PJSwiRxYMwac+nPYEesk1dpviU0Xx456o1qe
+# e5vhJ4D/0i4eXl317oH6v6kGltszUtr0VnaBsLAM9IRt1HosYYqaeyGrha1qbF7e
+# tVtjiZc6i9Npe+11ibhGkZZX01fPBVoyPl3tuTIYFN/tCbh2G3ezUo5OhYkK1C44
+# /LRNNP7aQZvfm93RghBbywnT8iCVh7Z2fgmHxit9vaNY534yOIZfrh+aEfNvVs7Q
+# oBuM1XwbUJhDhCeh6Ve9k3p6Rn1FsQLKdcNCXnnm3YweVrhvtPUy03EET44ZEcRp
+# UbJ6HR4O619YbI1QSV0Znbt0NycgDxetGXYfNZH7ciRo+XNgG+VPBHXVKMfaGGg3
+# l1mnF3aFWatRvZ0JJDUVeqcVGycL5VBp
 # SIG # End signature block

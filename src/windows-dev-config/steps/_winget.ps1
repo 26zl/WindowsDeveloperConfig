@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Prefer the WinGet module for structured results; fall back to winget.exe when PSGallery is unreachable.
+# Prefer structured module results; use winget.exe when the module is unavailable.
 $Script:DevConfigWinGetMode = 'Module'
 
 # Exit codes are stable across locales; console text is not.
@@ -75,6 +75,44 @@ function Initialize-DevConfigWinGet {
 
     Write-Host '  Using the built-in winget command instead.' -ForegroundColor Yellow
     Write-Verbose "WinGet module unavailable: $reason"
+    $Script:DevConfigWinGetMode = 'Cli'
+}
+
+function Confirm-DevConfigWinGetReady {
+    if ($Script:DevConfigWinGetMode -eq 'Cli') {
+        return
+    }
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            Get-WinGetPackage -Source winget -ErrorAction Stop | Out-Null
+            return
+        } catch [System.Runtime.InteropServices.COMException] {
+            # 0x800706BA means the module could not reach WinGet's RPC server.
+            if ($_.Exception.HResult -ne -2147023174) { throw }
+            $moduleError = $_.Exception.Message
+        }
+
+        if ($attempt -eq 1) {
+            Write-Host "  The WinGet module could not connect ($moduleError). Repairing WinGet..." -ForegroundColor Yellow
+            try {
+                $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop *>&1
+            } catch {
+                Write-Host "  WinGet repair did not complete: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    try {
+        $listed = Invoke-DevConfigWingetCli -Arguments @('list', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
+        if ($listed.ExitCode -ne 0 -and $listed.ExitCode -ne $Script:DevConfigWingetNotFound) {
+            throw "winget list failed with exit code $($listed.ExitCode)"
+        }
+    } catch {
+        throw "The WinGet module cannot connect ($moduleError), and winget.exe cannot query packages ($($_.Exception.Message)). Update App Installer from the Microsoft Store, then reopen PowerShell and run setup again."
+    }
+
+    Write-Host '  The WinGet module still cannot connect. Using the built-in winget command instead.' -ForegroundColor Yellow
     $Script:DevConfigWinGetMode = 'Cli'
 }
 
@@ -312,4 +350,91 @@ function Wait-DevConfigWingetPackageSettled {
         Start-Sleep -Seconds 3
     }
     Set-DevConfigStepUnverified -Reason "WinGet reported $Id installed, but its catalog still doesn't list it as current 15s later. It's on the machine -- re-run to confirm."
+}
+
+function Invoke-DevConfigInnoCleanup {
+    param(
+        [Parameter(Mandatory)] [string] $DisplayName,
+        [Parameter(Mandatory)] [string] $Publisher,
+        [Parameter(Mandatory)] [ValidateSet('user', 'machine')] [string] $Scope
+    )
+    $hive = if ($Scope -eq 'user') { 'HKCU' } else { 'HKLM' }
+    foreach ($root in @("${hive}:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            "${hive}:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $keys = Get-ChildItem -LiteralPath $root -ErrorAction Stop |
+            Where-Object { $_.PSChildName -like '*_is1' }
+        foreach ($key in $keys) {
+            $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+            if (-not $entry.PSObject.Properties['DisplayName'] -or
+                $entry.DisplayName -notin @($DisplayName, "$DisplayName (User)") -or
+                -not $entry.PSObject.Properties['Publisher'] -or $entry.Publisher -ne $Publisher) {
+                continue
+            }
+            $command = $entry.PSObject.Properties['UninstallString']
+            if (-not $command) {
+                throw "The registered $DisplayName uninstaller is missing. Repair its installation and retry."
+            }
+            $match = [regex]::Match([string]$command.Value, '(?i)^(?:"(?<Path>[^"]+\\unins[0-9]+\.exe)"|(?<Path>[^\s"]+\\unins[0-9]+\.exe))$')
+            $path = [Environment]::ExpandEnvironmentVariables($match.Groups['Path'].Value)
+            if (-not $match.Success -or $path -notmatch '^(?:[a-zA-Z]:\\|\\\\[^\\]+\\[^\\]+\\)') {
+                throw "The registered $DisplayName Inno uninstaller is not a supported executable path. Repair its installation and retry."
+            }
+            Invoke-DevConfigCleanupCommand -FilePath $path `
+                -Arguments @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') -Unelevated:($Scope -eq 'user') | Out-Null
+        }
+    }
+}
+
+function Invoke-DevConfigPackageCleanup {
+    param(
+        [Parameter(Mandatory)] [string[]] $Ids,
+        [hashtable] $InnoUninstall,
+        [switch] $CheckOnly
+    )
+    $failures = @()
+    $operation = if ($CheckOnly) { 'list' } else { 'uninstall' }
+    foreach ($id in $Ids) {
+        foreach ($scope in @('user', 'machine')) {
+            try {
+                if (-not $CheckOnly -and $InnoUninstall) {
+                    Invoke-DevConfigInnoCleanup @InnoUninstall -Scope $scope
+                }
+                $arguments = @($operation, $id)
+                if (-not $CheckOnly) {
+                    $arguments += '--silent'
+                }
+                $arguments += '--exact', '--scope', $scope, '--disable-interactivity', '--accept-source-agreements'
+                $result = Invoke-DevConfigCleanupCommand -FilePath 'winget.exe' -Arguments $arguments `
+                    -SuccessCodes @(0, $Script:DevConfigWingetNotFound) -Unelevated:($scope -eq 'user' -and -not $CheckOnly)
+                if ($CheckOnly -and $result.ExitCode -eq 0) {
+                    return $false
+                }
+            } catch {
+                $failures += "$id ($scope): $($_.Exception.Message)"
+            }
+        }
+
+        try {
+            $packages = @(Get-AppxPackage -AllUsers -Name $id -ErrorAction Stop)
+            if ($CheckOnly) {
+                if ($packages.Count -gt 0) {
+                    return $false
+                }
+            } else {
+                foreach ($package in $packages) {
+                    Remove-AppxPackage -Package $package.PackageFullName -AllUsers -ErrorAction Stop
+                }
+            }
+        } catch {
+            $failures += "$id (MSIX): $($_.Exception.Message)"
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        throw ($failures -join "`n")
+    }
+    if ($CheckOnly) {
+        return $true
+    }
 }

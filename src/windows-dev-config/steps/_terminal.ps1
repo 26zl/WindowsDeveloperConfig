@@ -11,9 +11,84 @@ $Script:DevConfigTerminalJsonDepth = 32
 
 # The settings schema accepts a profile name for defaultProfile when a GUID is not available.
 $Script:DevConfigPs7ProfileName = 'PowerShell'
+$Script:CopilotFragmentGuid = '{b1a4d2c8-6f3e-4a7b-9e2d-1c8f5a3b7d91}'
 
-# Paths already backed up in this run, so a later phase cannot overwrite the pre-run original.
+# Paths backed up in this operation; null means resume could not recover the backup state.
 $Script:DevConfigTerminalBackedUp = @()
+$Script:DevConfigTerminalFontRunOnceKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+$Script:DevConfigTerminalFontRunOnceName = 'CalmOS-ApplyTerminalFont'
+
+function Get-DevConfigPendingTerminalFontPath {
+    Join-Path $env:LOCALAPPDATA 'CalmOS\terminal-font.json'
+}
+
+function Get-DevConfigTerminalFontRunOnceCommand {
+    if (Test-Path -LiteralPath $Script:DevConfigTerminalFontRunOnceKey) {
+        $values = Get-ItemProperty -LiteralPath $Script:DevConfigTerminalFontRunOnceKey
+        $property = $values.PSObject.Properties[$Script:DevConfigTerminalFontRunOnceName]
+        if ($property) { return $property.Value }
+    }
+    return $null
+}
+
+function Get-DevConfigPendingTerminalFont {
+    $path = Get-DevConfigPendingTerminalFontPath
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    $pending = (Read-DevConfigTextFile -Path $path) | ConvertFrom-Json
+    if ($pending -isnot [pscustomobject]) {
+        throw 'The pending Terminal font update is invalid. Run setup again to reschedule it.'
+    }
+    foreach ($name in 'Path', 'FontFace', 'PreviousFace', 'BackupRequired', 'Command') {
+        if (-not $pending.PSObject.Properties[$name]) {
+            throw 'The pending Terminal font update is incomplete. Run setup again to reschedule it.'
+        }
+    }
+    if ($pending.Path -isnot [string] -or $pending.FontFace -isnot [string] -or
+        $pending.Command -isnot [string] -or $pending.BackupRequired -isnot [bool] -or
+        ($null -ne $pending.PreviousFace -and $pending.PreviousFace -isnot [string])) {
+        throw 'The pending Terminal font update has invalid values. Run setup again to reschedule it.'
+    }
+    return $pending
+}
+
+function Invoke-DevConfigTerminalFontLock {
+    param([Parameter(Mandatory)] [scriptblock] $ScriptBlock)
+
+    $lockPath = [IO.Path]::ChangeExtension((Get-DevConfigPendingTerminalFontPath), '.lock')
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $lockPath)) | Out-Null
+    $lock = Invoke-DevConfigRetry -Name 'Terminal font update lock' -InitialDelaySeconds 1 -ScriptBlock {
+        [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    try {
+        & $ScriptBlock
+    } finally {
+        $lock.Dispose()
+    }
+}
+
+function Clear-DevConfigPendingTerminalFont {
+    param([switch] $LockHeld)
+
+    if (-not $LockHeld) {
+        if ((Test-Path -LiteralPath (Get-DevConfigPendingTerminalFontPath)) -or (Get-DevConfigTerminalFontRunOnceCommand)) {
+            Invoke-DevConfigTerminalFontLock { Clear-DevConfigPendingTerminalFont -LockHeld }
+        }
+        return
+    }
+    if (Get-DevConfigTerminalFontRunOnceCommand) {
+        Remove-ItemProperty -LiteralPath $Script:DevConfigTerminalFontRunOnceKey -Name $Script:DevConfigTerminalFontRunOnceName
+    }
+    $path = Get-DevConfigPendingTerminalFontPath
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
+function Get-DevConfigCopilotFragmentDir {
+    Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\DevConfig'
+}
 
 # Stable Terminal is preferred over Preview because it is the profile users launch by default.
 function Get-DevConfigTerminalPackagedSettingsPath {
@@ -66,16 +141,34 @@ function Read-DevConfigTerminalSettings {
 
     # Invalid JSON stops the run so a hand-edited settings file is not overwritten.
     try {
+        if ($PSVersionTable.PSEdition -ne 'Core') {
+            # Windows PowerShell needs JSONC comments and trailing commas removed without changing strings.
+            $raw = [regex]::Replace($raw, '("(?:\\.|[^"\\])*")|//[^\r\n]*|/\*[\s\S]*?\*/', {
+                param($match)
+                if ($match.Groups[1].Success) { $match.Value } else { ' ' }
+            })
+            # A trailing comma must follow a value, not an opening delimiter or another comma.
+            $raw = [regex]::Replace($raw, '("(?:\\.|[^"\\])*")|(?<=[}\]"0-9el])\s*,\s*(?=[}\]])', '$1')
+        }
         $settings = $raw | ConvertFrom-Json
         if ($null -eq $settings) {
             return [pscustomobject]@{}
         }
         return $settings
     } catch {
-        if ($PSVersionTable.PSEdition -ne 'Core') {
-            throw "PowerShell 7 is required to safely read Windows Terminal's settings, so $Path was left untouched."
-        }
         throw "Windows Terminal's settings file couldn't be read as JSON, so it was left untouched. Fix or rename $Path and run this again."
+    }
+}
+
+function Save-DevConfigTerminalBackup {
+    param([Parameter(Mandatory)] [string] $Path)
+
+    if ($null -eq $Script:DevConfigTerminalBackedUp) {
+        throw 'The Terminal backup state could not be restored; settings were left unchanged to preserve the original backup.'
+    }
+    if ((Test-Path -LiteralPath $Path) -and ($Script:DevConfigTerminalBackedUp -notcontains $Path)) {
+        Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force
+        $Script:DevConfigTerminalBackedUp += $Path
     }
 }
 
@@ -85,10 +178,7 @@ function Save-DevConfigTerminalSettings {
         [Parameter(Mandatory)] [string] $Path,
         [Parameter(Mandatory)] [object] $Settings
     )
-    if ((Test-Path -LiteralPath $Path) -and ($Script:DevConfigTerminalBackedUp -notcontains $Path)) {
-        Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force
-        $Script:DevConfigTerminalBackedUp += $Path
-    }
+    Save-DevConfigTerminalBackup -Path $Path
     $json = $Settings | ConvertTo-Json -Depth $Script:DevConfigTerminalJsonDepth
     Write-DevConfigTextFile -Path $Path -Content $json
 }
@@ -155,4 +245,64 @@ function Find-DevConfigPs7Profile {
         (Get-DevConfigJsonValue -Object $_ -Path 'source') -eq 'Windows.Terminal.PowershellCore' -or
         (Get-DevConfigJsonValue -Object $_ -Path 'name')   -eq $Script:DevConfigPs7ProfileName
     } | Select-Object -First 1
+}
+
+function Reset-DevConfigTerminal {
+    param(
+        [Parameter(Mandatory)] [string] $DistributionName,
+        [switch] $CheckOnly
+    )
+    if ($CheckOnly) {
+        if ((Test-Path -LiteralPath (Get-DevConfigPendingTerminalFontPath)) -or (Get-DevConfigTerminalFontRunOnceCommand)) {
+            return $false
+        }
+    } else {
+        Clear-DevConfigPendingTerminalFont
+    }
+    $path = Get-DevConfigTerminalSettingsPath
+    if (-not $path) {
+        return $true
+    }
+
+    $settings = Read-DevConfigTerminalSettings -Path $path
+    $changed = $false
+    if ($settings.PSObject.Properties['defaultProfile']) {
+        $settings.PSObject.Properties.Remove('defaultProfile')
+        $changed = $true
+    }
+
+    $profiles = Get-DevConfigJsonValue -Object $settings -Path 'profiles'
+    if ($null -ne $profiles -and $profiles.PSObject.Properties['defaults']) {
+        $profiles.PSObject.Properties.Remove('defaults')
+        $changed = $true
+    }
+
+    $list = Get-DevConfigJsonValue -Object $settings -Path 'profiles', 'list'
+    if ($null -ne $list) {
+        $profileGuids = @(
+            '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+            '{463c642a-294e-5f7d-87c0-3061fde7adfd}'
+            $Script:CopilotFragmentGuid
+            '{2c4de342-38b7-51cf-b940-2309a097f518}'
+            '{08c3a759-e9c2-5cd9-a652-37191c8995ca}'
+        )
+        $remaining = @($list | Where-Object {
+            $guid = Get-DevConfigJsonValue -Object $_ -Path 'guid'
+            $name = Get-DevConfigJsonValue -Object $_ -Path 'name'
+            $source = Get-DevConfigJsonValue -Object $_ -Path 'source'
+            $guid -notin $profileGuids -and $name -ne $DistributionName -and
+                $source -ne 'Windows.Terminal.PowershellCore'
+        })
+        if ($remaining.Count -ne @($list).Count) {
+            $profiles.PSObject.Properties['list'].Value = $remaining
+            $changed = $true
+        }
+    }
+
+    if ($CheckOnly) {
+        return -not $changed
+    }
+    if ($changed) {
+        Save-DevConfigTerminalSettings -Path $path -Settings $settings
+    }
 }

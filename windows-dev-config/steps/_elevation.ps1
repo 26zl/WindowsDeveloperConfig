@@ -47,6 +47,86 @@ function Test-DevConfigIsAdmin {
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Invoke-DevConfigUnelevatedCommand {
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [string[]] $Arguments = @(),
+        [ValidateRange(1, 86400)] [int] $TimeoutSeconds = 900
+    )
+    if (-not (Test-DevConfigIsAdmin)) {
+        return Invoke-DevConfigNativeCommand -FilePath $FilePath -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
+    }
+
+    $taskName = 'WindowsDevConfigUserCommand-' + [guid]::NewGuid().ToString('N')
+    $outputPath = [IO.Path]::GetTempFileName()
+    $registered = $false
+    try {
+        $fileLiteral = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($FilePath)
+        $outputLiteral = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($outputPath)
+        $argumentLiterals = @($Arguments | ForEach-Object {
+            "'" + [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($_) + "'"
+        })
+        $nativeHelper = ${function:Invoke-DevConfigNativeCommand}.ToString()
+        $command = @"
+function Invoke-DevConfigNativeCommand { $nativeHelper }
+try {
+    `$result = Invoke-DevConfigNativeCommand -FilePath '$fileLiteral' -Arguments @($($argumentLiterals -join ', ')) -TimeoutSeconds $TimeoutSeconds
+    [IO.File]::WriteAllText('$outputLiteral', `$result.Output)
+    if (`$null -eq `$result.ExitCode) { exit 1 }
+    exit `$result.ExitCode
+} catch {
+    [IO.File]::WriteAllText('$outputLiteral', `$_.Exception.Message)
+    if (`$_.Exception -is [TimeoutException]) { exit 258 }
+    exit 1
+}
+"@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action = New-ScheduledTaskAction -Execute $shell -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded"
+        $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($TimeoutSeconds + 60)) `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        $registered = $true
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $nextProgress = 60
+        $hasStarted = $false
+        Start-ScheduledTask -TaskName $taskName
+        do {
+            Start-Sleep -Milliseconds 500
+            $task = Get-ScheduledTask -TaskName $taskName
+            $info = Get-ScheduledTaskInfo -TaskName $taskName
+            # A new task reports 0x41303 until its first run.
+            $hasStarted = $hasStarted -or $task.State -eq 'Running' -or $info.LastTaskResult -ne 0x41303
+            if (-not $hasStarted -and $timer.Elapsed.TotalSeconds -ge 30) {
+                throw 'Per-user cleanup could not start. Sign in with the account running this script and retry.'
+            }
+            if ($timer.Elapsed.TotalSeconds -ge ($TimeoutSeconds + 30)) {
+                throw "The per-user command timed out: $FilePath $($Arguments -join ' ')."
+            }
+            if ($timer.Elapsed.TotalSeconds -ge $nextProgress) {
+                Write-Host "  still working -- $([int]$timer.Elapsed.TotalMinutes)m so far" -ForegroundColor DarkGray
+                $nextProgress += 60
+            }
+        } while (-not $hasStarted -or $task.State -in @('Running', 'Queued'))
+
+        $exitCode = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$info.LastTaskResult), 0)
+        if ($exitCode -eq 258) {
+            throw "The per-user command timed out: $FilePath $($Arguments -join ' ')."
+        }
+        return [pscustomobject]@{ ExitCode = $exitCode; Output = [IO.File]::ReadAllText($outputPath) }
+    } finally {
+        if ($registered) {
+            if ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued')) {
+                Stop-ScheduledTask -TaskName $taskName
+            }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+        }
+        Remove-Item -LiteralPath $outputPath -Force
+    }
+}
+
 function Get-DevConfigShellExe {
     # Prefer pwsh when it is on PATH; Windows PowerShell 5.1 is always available as fallback.
     if (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
@@ -71,18 +151,25 @@ function Get-DevConfigRelaunchArguments {
         [Parameter(Mandatory)] [string] $ScriptPath,
         [switch] $Resumed,
         [switch] $AllowUnsigned,
-        [switch] $RequestElevation
+        [switch] $RequestElevation,
+        [switch] $ApplyTerminalFont,
+        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
     )
     $arguments = @('-NoProfile')
     if (-not $AllowUnsigned) {
         $arguments += '-ExecutionPolicy', 'RemoteSigned'
     }
     $arguments += '-File', "`"$ScriptPath`""
-    if (-not $RequestElevation) {
-        $arguments += '-NoElevate'
-    }
-    if ($Resumed) {
-        $arguments += '-Resumed'
+    if ($ApplyTerminalFont) {
+        $arguments += '-ApplyTerminalFont'
+    } else {
+        $arguments += '-Action', $Action
+        if (-not $RequestElevation) {
+            $arguments += '-NoElevate'
+        }
+        if ($Resumed) {
+            $arguments += '-Resumed'
+        }
     }
     if ($AllowUnsigned) {
         $arguments += '-AllowUnsigned'
@@ -95,7 +182,8 @@ function Invoke-DevConfigElevate {
         [Parameter(Mandatory)] [string] $ScriptPath,
         [switch] $NoElevate,
         [switch] $Resumed,
-        [switch] $AllowUnsigned
+        [switch] $AllowUnsigned,
+        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
     )
 
     if (Test-DevConfigIsAdmin) {
@@ -108,9 +196,13 @@ function Invoke-DevConfigElevate {
 
     Write-Host 'This needs to run elevated once (a UAC prompt will appear)...' -ForegroundColor Yellow
 
-    $shell = Get-DevConfigShellExe
+    $shell = if ($Action -eq 'Uninstall') {
+        Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    } else {
+        Get-DevConfigShellExe
+    }
     # Preserve -Resumed so the elevated process continues after the WSL reboot.
-    $relaunchArgs = Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
+    $relaunchArgs = Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action
     try {
         $proc = Start-Process -FilePath $shell -ArgumentList $relaunchArgs -Verb RunAs -Wait -PassThru
     } catch {
@@ -127,10 +219,10 @@ function Invoke-DevConfigElevate {
 }
 
 # SIG # Begin signature block
-# MIInOgYJKoZIhvcNAQcCoIInKzCCJycCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIInNwYJKoZIhvcNAQcCoIInKDCCJyQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCfRCC3aYIJxOnR
-# iR9z3bZNM6UXU/vEJmkDGQUKLFzHaKCCDMkwggYEMIID7KADAgECAhMzAAACHPrN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDWGcEuxfXxK5gE
+# 5RkpWamZuN/2I/UfKfqfFHqXdIsKQKCCDMkwggYEMIID7KADAgECAhMzAAACHPrN
 # xZvoL37EAAAAAAIcMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQxWhcNMjcwNDE1MTg1
@@ -198,27 +290,27 @@ function Invoke-DevConfigElevate {
 # /fg8B2qjW88MT/WF5V5uvZGtqa9FSL2RazArA+rDPuf6JGYz4HpgMZHB4S6szWSK
 # YBv0VisCzfxgeU+dquXW9bd0auYlOB58DPcOYKdc3Se94g+xL4pcEhbB54JOgAkw
 # YTu/9dLeH2pDqeJZAABVDWRQCaXfO5LgyKwKCLYXpigrZYCjUSBcr+Ve8PFWMhVT
-# Ql0v4q8J/AUmQN5W4n101cY2L4A7GTQG1h32HHAvfQESWP0xghnHMIIZwwIBATBu
+# Ql0v4q8J/AUmQN5W4n101cY2L4A7GTQG1h32HHAvfQESWP0xghnEMIIZwAIBATBu
 # MFcxCzAJBgNVBAYTAlVTMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # KDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIc
 # +s3Fm+gvfsQAAAAAAhwwDQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwG
-# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIFk98vw2b6bwZ+PBshBtIH6WWPBs
-# BrofNi/7dHpvhtSZMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
+# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIH30XdhwFPa4J5PuHU6LiCAc/hx1
+# CkpWPd/8QZhdXhbKMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
 # AGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAE
-# ggEASIENLdJq2FoelVMJnlHWQue3dNkZ3Hbb4rhvrdb7X4tGvJIEREHGkAJZgOuu
-# ga4vm0Ct310TflL2CegUBCZ3NxGUe+MmnIrZEiXPjBMPIsr87x49n0+BfFPxMR7M
-# Xq+/pRcbeZXbsPk3Or+jdI+lTCAB2IaZDwuV4hvvTghAWpokmKPQYLbUJ+/fcgwB
-# vbfd6uYFSLhH1HzuvE369PSD3YsXMGH0C7QF2GEuxsqNhsr5RcgQJAdgwIvmwKSC
-# SXEAmM8orRh4bSs5fVl1G58/+DDgdkd0AXwv8VyDdViTKbrsFx4wA/vg1DG2/sv8
-# EuJPLqKseZ2RgdpTFtOMC3Tnq6GCF5cwgheTBgorBgEEAYI3AwMBMYIXgzCCF38G
-# CSqGSIb3DQEHAqCCF3AwghdsAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
+# ggEABiZQWl1avXgHMz7q01FMLnz+bArr1ZD738QiBje/FLSrrCF4VJSwIk1eO8Ur
+# Kw9SeV597CgbvdKXJ5Up9EYlQ2zthJUpugrYum4lrZTdOz323EoxTBQac1aZQ2XV
+# 6MxWvOh1vw/IUpb+zLKXQUZ9wuRt/k+RoUZDQZdHo6yqHtP8Yw7rSybVo/eO5pS9
+# IvJGeU3HtJTqUleV3GlyIKQIrFfgC7EHGOZ0518kgvrSn+xb3qCDe+Kr8KQT1Jou
+# yNA5LOFyvPZJe/YcUUKxH8RbbElLXOxfDqpnY5AZOTpSUO/1n6sU+d4Qya8GMLJ7
+# ZsP6fZu5DHHb69c5qp7YnGNoQqGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
+# CSqGSIb3DQEHAqCCF20wghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
 # 9w0BCRABBKCCAUEEggE9MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQC
-# AQUABCBU3g40BtAdc9hpzm+Tyqnw2mOaPKCKPhw/OuFuYde0JAIGaqpmra2DGBMy
-# MDI2MDkxODE2MTEzOS45MzVaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
+# AQUABCAfbTt4JIqwwu/juaeZASyKX5JfTqvWh3n5f0Rxzq0eIwIGaqpnzToPGBMy
+# MDI2MDkyNTIyNDkwOS44NzFaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
 # MBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMV
 # TWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmlj
 # YSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046OTYwMC0wNUUw
-# LUQ5NDcxJTAjBgNVBAMTHE1pY3Jvc29mdCBUaW1lLVN0YW1wIFNlcnZpY2WgghHt
+# LUQ5NDcxJTAjBgNVBAMTHE1pY3Jvc29mdCBUaW1lLVN0YW1wIFNlcnZpY2WgghHq
 # MIIHIDCCBQigAwIBAgITMwAAAiY1tD5nQ5P2HwABAAACJjANBgkqhkiG9w0BAQsF
 # ADB8MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMH
 # UmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQD
@@ -296,8 +388,8 @@ function Invoke-DevConfigElevate {
 # ujhLmm77IVRrakURR6nxt67I6IleT53S0Ex2tVdUCbFpAUR+fKFhbHP+CrvsQWY9
 # af3LwUFJfn6Tvsv4O+S3Fb+0zj6lMVGEvL8CwYKiexcdFYmNcP7ntdAoGokLjzba
 # ukz5m/8K6TT4JDVnK+ANuOaMmdbhIurwJ0I9JZTmdHRbatGePu1+oDEzfbzL6Xu/
-# OHBE0ZDxyKs6ijoIYn/ZcGNTTY3ugm2lBRDBcQZqELQdVTNYs6FwZvKhggNQMIIC
-# OAIBATCB+aGB0aSBzjCByzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0
+# OHBE0ZDxyKs6ijoIYn/ZcGNTTY3ugm2lBRDBcQZqELQdVTNYs6FwZvKhggNNMIIC
+# NQIBATCB+aGB0aSBzjCByzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0
 # b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3Jh
 # dGlvbjElMCMGA1UECxMcTWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEnMCUG
 # A1UECxMeblNoaWVsZCBUU1MgRVNOOjk2MDAtMDVFMC1EOTQ3MSUwIwYDVQQDExxN
@@ -305,36 +397,36 @@ function Invoke-DevConfigElevate {
 # Ftkqr7XMXdsRyWU0lSKHZ6CBgzCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQI
 # EwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3Nv
 # ZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBD
-# QSAyMDEwMA0GCSqGSIb3DQEBCwUAAgUA7leHxjAiGA8yMDI2MDkxODA5NDk1OFoY
-# DzIwMjYwOTE5MDk0OTU4WjB3MD0GCisGAQQBhFkKBAExLzAtMAoCBQDuV4fGAgEA
-# MAoCAQACAgXlAgH/MAcCAQACAhdWMAoCBQDuWNlGAgEAMDYGCisGAQQBhFkKBAIx
-# KDAmMAwGCisGAQQBhFkKAwKgCjAIAgEAAgMHoSChCjAIAgEAAgMBhqAwDQYJKoZI
-# hvcNAQELBQADggEBAA0GYEmRN9eylopohMTO8jUZ4OLUAqOh5v8fqJES5iVnPxeh
-# 27h1BIn2tNSpDhix5/zSYGiP2WkYSgl4IZF7DNhF+uIfYbpn6Z27TB9Z8uYkip3a
-# yxmdsyT3A21Vu8iATmJaFsvfSOMDnjn4cRwmUFKeSt/sB6UKy38KnRAm0yGimwvp
-# rLbhDJeQTWOqFTceAn0AVzrA/ezfuUI1vLvYs0z0oCBKT2XFuxdUsUgsmWhA0Zyf
-# ZuBXBBjungl4xqATilVZgwVljtoyTAurGoi/RtXFZyTYYHedstOxjxWffoVYkCGJ
-# Gft5KNSnkcLnnkynhipWi7lJxyoElEejHjJZsZwxggQNMIIECQIBATCBkzB8MQsw
-# CQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9u
-# ZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNy
-# b3NvZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAiY1tD5nQ5P2HwABAAACJjAN
-# BglghkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8G
-# CSqGSIb3DQEJBDEiBCAA1RwBFiumib58yKOVafrtDe/55TWul/8AwoHCH1ggTDCB
-# +gYLKoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIMwyXGFnTNsZRBrs6GN/BbV0okaN
-# P3VBYqLFjUsFnbgqMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldh
-# c2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBD
-# b3Jwb3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIw
-# MTACEzMAAAImNbQ+Z0OT9h8AAQAAAiYwIgQg2owTg9J3hzWYiP1FPCmkeA9nm7+q
-# AsQzFU6M1OlBLPIwDQYJKoZIhvcNAQELBQAEggIAdpVs6b7MnBltGgMjznropJCs
-# ZLUr2zRaQHX2ndSyS2VUVWEUhlobfJcx1WoZQDbhrrUTxQkjegG13ZxJeEMjLFHs
-# /Dh9gfDDlsqTr7LhfQ9U59MLXi/YDzyrpJFm5mbDVzpngD804J7oK2B+bp/hsDg9
-# 6DZwIjsKX8X0iymsh1zLQodEw1EaU9mv5TyGsNlB0VS7QEhwxtwcQga5tIX4MSoA
-# H2Mkar1c38HrmpkbcQNdKBCrOBY6fl6Zhgwg3wya2rvx5Oy0+lE6KYb3J67IUeWi
-# pcq2U0sfKI1FHSPiPwbIuCoOiZKaQs53QXd6G6mCcQFsVHlgT6M2+nhhsN1UA33X
-# 9CVAAUG+/mXBtAGcjO2UM4PGC/3zFjnH1Auj8hDXWKsa/h7Alwm2j4Kx2qzcz094
-# E+ejRiHhJ2//NV/IEM7KK8YKelqbEHfGhgsWasDrYb0DqQptZjBHyrue3fy5I+FB
-# KcYdvDmOx/5lnUUI5dF9gP5jOpJcaPGwQ8J6ixvOFV+Z93Yu9kGL8wgHUgK43jwR
-# H9eTgvZgz4aC3xKebWrIMCccLvmotXSJ54fauvtQZC4KJO2aece7ZzcuKNvWKDZy
-# OxhClYtB8biYYrrJhTBuu7ovuawmdOrO4PaHF9ZQhrIArp80uxzEk2Jbpd7WFg+Y
-# CgZ05NDkWnLw7OWdaI4=
+# QSAyMDEwMA0GCSqGSIb3DQEBCwUAAgUA7mFrBjAiGA8yMDI2MDkyNTIxNDk1OFoY
+# DzIwMjYwOTI2MjE0OTU4WjB0MDoGCisGAQQBhFkKBAExLDAqMAoCBQDuYWsGAgEA
+# MAcCAQACAiHJMAcCAQACAhYDMAoCBQDuYryGAgEAMDYGCisGAQQBhFkKBAIxKDAm
+# MAwGCisGAQQBhFkKAwKgCjAIAgEAAgMHoSChCjAIAgEAAgMBhqAwDQYJKoZIhvcN
+# AQELBQADggEBALjtW26VvEezMv7hR+YOAzBuGEwRAPN1JwEnppd4arIaJ7u432CQ
+# 4QP9FMS3wpOiDQJZbK/1mZdWA1sIrxUv0Ru/SbgWC/yAhpsD6nyBKa+74SeLLjfU
+# Ki2MVfscLw/0SVzwl5/Z283sCbEkq8C3xfClJHlxaKeISiiCjeRqJ1J+6sFrbnmF
+# F4YimCuvihluq74feGo0lNhrhXsGT4nJxkxn+JJ83scx7Iu6uoiD43vmreNXXrK8
+# 7DywoFyoiUJfodfmLU4YKxY6wXNluoIIfg05PG5rI/9oXs3S2ywDMT6DGJjqypPw
+# Fv9pmwmpm527mozWV46vZ2vDZRITYJtvZm0xggQNMIIECQIBATCBkzB8MQswCQYD
+# VQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEe
+# MBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3Nv
+# ZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAiY1tD5nQ5P2HwABAAACJjANBglg
+# hkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqG
+# SIb3DQEJBDEiBCD6rFEm7vOlhI/Dp9pr2jAdPxf/IQtI/W4Az234yvATRDCB+gYL
+# KoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIMwyXGFnTNsZRBrs6GN/BbV0okaNP3VB
+# YqLFjUsFnbgqMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
+# bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
+# b3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAC
+# EzMAAAImNbQ+Z0OT9h8AAQAAAiYwIgQgxl3EU9gAKN+/KOPDSLT4rggTvgpv1lhp
+# ewiiCFs9ELIwDQYJKoZIhvcNAQELBQAEggIAkdVkHHT141JbFLyPbEstHvJVtTNe
+# WBWkfmPrlgtWoGSfWtHEcMrd+2EYVBrHhAz54kIO+XI1M1TpwV4ZlRdhOD4yeVPK
+# Mm4S6HFXho+eKKHr8M+xwKfextJjvsMRo7hLFEjnpKhE7K8jVqreh58QlXFAAZAx
+# hYRT+xL4zBwNFcqCdTu8CfdcAjubOpguM0yhV5FAyh3IBmAP2M15d4703MzIbGWh
+# a/3qof5qIdKSXSK5KLO8f78oMLq7Ae9plqvEsInauSMBrmpuX67Hkp61ehVNulaf
+# vov/c/4D+xUFsxxQgS6vjST1AISmMAZEa0NBTnLCzlaYt4lGM2ZZOgUks47dqhDz
+# 2hX3H+LdUkMyNkCzXK4TNaTMJZOpUQ00fnRRhRBRY6tZFsBmGeWSiCQnkdo4CPRl
+# eGOtD0MvEhAN3fefEcpFIyCuMjTZYBX3arwgSPncp0gsndBFcZXhYnL/XgmGsb38
+# dxuyyr8XLrd7VtCQAkV92SQ/vSMLwIWu1YqszaAfBDlmmtsf9Sxf4iRXVCUHNFCW
+# eaUes8W+Popebb5jE0dUoHGSwgIbdSEOGHuwubC9YSKo6LoOihXq5CxksVbcicSt
+# fPUDkQiAcWZBgp0zFYOJz+6fAf2RBDmzODsdiIOtHMV66OmNC7UYxRCthYo9wXMa
+# h+L+xIFKA6B1XdU=
 # SIG # End signature block

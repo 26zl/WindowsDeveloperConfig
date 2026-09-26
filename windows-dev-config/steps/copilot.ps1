@@ -6,11 +6,9 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Script:CopilotFragmentGuid = '{b1a4d2c8-6f3e-4a7b-9e2d-1c8f5a3b7d91}'
-
-function Get-DevConfigCopilotFragmentDir {
-    Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\Fragments\DevConfig'
-}
+$Script:DevConfigWinUITemplatePackage = 'Microsoft.WindowsAppSDK.WinUI.CSharp.Templates'
+$Script:DevConfigWinSkillsMarketplace = 'win-dev-skills'
+$Script:DevConfigWinUIPlugin = "winui@$Script:DevConfigWinSkillsMarketplace"
 
 function Test-DevConfigCopilotTerminalProfile {
     $fragmentsDir = Get-DevConfigCopilotFragmentDir
@@ -81,7 +79,7 @@ function Install-DevConfigWinUITemplates {
     if (-not (Get-Command 'dotnet' -ErrorAction SilentlyContinue)) {
         throw 'dotnet is not on PATH yet, so the WinUI templates cannot be installed. Re-run once the .NET SDK is in place.'
     }
-    $r = Invoke-DevConfigNativeCommand -FilePath 'dotnet' -Arguments @('new', 'install', 'Microsoft.WindowsAppSDK.WinUI.CSharp.Templates')
+    $r = Invoke-DevConfigNativeCommand -FilePath 'dotnet' -Arguments @('new', 'install', $Script:DevConfigWinUITemplatePackage)
     if ($r.ExitCode -ne 0) {
         Write-Host $r.Output
         throw "dotnet new install failed with exit code $($r.ExitCode)"
@@ -93,14 +91,14 @@ function Test-DevConfigWinSkillsMarketplaceAdded {
         return $false
     }
     $r = Invoke-DevConfigNativeCommand -FilePath 'copilot' -Arguments @('plugin', 'marketplace', 'list')
-    return $r.ExitCode -eq 0 -and $r.Output -match 'win-dev-skills'
+    return $r.ExitCode -eq 0 -and $r.Output -match [regex]::Escape($Script:DevConfigWinSkillsMarketplace)
 }
 
 function Add-DevConfigWinSkillsMarketplace {
     if (-not (Get-Command 'copilot' -ErrorAction SilentlyContinue)) {
         throw 'The copilot command is not on PATH yet, so its marketplace cannot be configured. Re-run once GitHub Copilot CLI is in place.'
     }
-    $r = Invoke-DevConfigNativeCommand -FilePath 'copilot' -Arguments @('plugin', 'marketplace', 'add', 'microsoft/win-dev-skills')
+    $r = Invoke-DevConfigNativeCommand -FilePath 'copilot' -Arguments @('plugin', 'marketplace', 'add', "microsoft/$Script:DevConfigWinSkillsMarketplace")
     if ($r.ExitCode -ne 0) {
         Write-Host $r.Output
         throw "copilot plugin marketplace add failed with exit code $($r.ExitCode)"
@@ -119,14 +117,97 @@ function Install-DevConfigWinUIPlugin {
     if (-not (Get-Command 'copilot' -ErrorAction SilentlyContinue)) {
         throw 'The copilot command is not on PATH yet, so the WinUI plugin cannot be installed. Re-run once GitHub Copilot CLI is in place.'
     }
-    $r = Invoke-DevConfigNativeCommand -FilePath 'copilot' -Arguments @('plugin', 'install', 'winui@win-dev-skills')
+    $r = Invoke-DevConfigNativeCommand -FilePath 'copilot' -Arguments @('plugin', 'install', $Script:DevConfigWinUIPlugin)
     if ($r.ExitCode -ne 0) {
         Write-Host $r.Output
         throw "copilot plugin install winui failed with exit code $($r.ExitCode)"
     }
 }
 
+function Get-DevConfigInstalledWinUIPlugin {
+    if (-not (Get-Command copilot -CommandType Application -ErrorAction SilentlyContinue)) {
+        return
+    }
+
+    $result = Invoke-DevConfigCleanupCommand -FilePath 'copilot' -Arguments @('plugin', 'list', '--json')
+    # Assignment avoids nesting the JSON array in Windows PowerShell 5.1.
+    $plugins = $result.Output | ConvertFrom-Json
+    foreach ($plugin in $plugins) {
+        $id = "$($plugin.name)@$($plugin.marketplace)"
+        if ($id -in @($Script:DevConfigWinUIPlugin, 'winui@awesome-copilot')) {
+            $id
+        }
+    }
+}
+
+function Test-DevConfigWinUITemplatePackageInstalled {
+    if (Get-Command dotnet -CommandType Application -ErrorAction SilentlyContinue) {
+        $sdks = Invoke-DevConfigCleanupCommand -FilePath 'dotnet' -Arguments @('--list-sdks')
+        if (-not [string]::IsNullOrWhiteSpace($sdks.Output)) {
+            $result = Invoke-DevConfigCleanupCommand -FilePath 'dotnet' -Arguments @('new', 'uninstall')
+            return @($result.Output -split '\r?\n' | Where-Object { $_.Trim() -eq $Script:DevConfigWinUITemplatePackage }).Count -gt 0
+        }
+    }
+
+    $cliHome = if ($env:DOTNET_CLI_HOME) { $env:DOTNET_CLI_HOME } else { $env:USERPROFILE }
+    $packages = Join-Path $cliHome '.templateengine\packages'
+    if ((Test-Path -LiteralPath $packages) -and
+        @(Get-ChildItem -LiteralPath $packages -Filter "$Script:DevConfigWinUITemplatePackage.*.nupkg" -File).Count -gt 0) {
+        throw 'The WinUI template package remains, but no .NET SDK is available. Repair the SDK and retry cleanup.'
+    }
+    return $false
+}
+
+function Test-DevConfigWinSkillsMarketplaceRegistered {
+    if (-not (Get-Command copilot -CommandType Application -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $result = Invoke-DevConfigCleanupCommand -FilePath 'copilot' -Arguments @('plugin', 'marketplace', 'list', '--json')
+    $marketplaces = $result.Output | ConvertFrom-Json
+    return @($marketplaces | Where-Object { $_.name -eq $Script:DevConfigWinSkillsMarketplace }).Count -gt 0
+}
+
 function Invoke-CopilotPhase {
+    if ($Script:DevConfigAction -eq 'Uninstall') {
+        $fragmentsDir = Get-DevConfigCopilotFragmentDir
+        $fragmentPaths = @(
+            (Join-Path $fragmentsDir 'github-copilot.fragment.json')
+            (Join-Path $fragmentsDir 'copilot.png')
+        )
+        $steps = @(
+            New-DevConfigStep -Name 'CopilotFragmentCleanup' -Description 'Remove the Copilot Terminal fragment and icon' -BestEffort `
+                -Check { param($Paths) @($Paths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0 } `
+                -Apply {
+                    param($Paths)
+                    foreach ($path in $Paths) {
+                        if (Test-Path -LiteralPath $path) {
+                            Remove-Item -LiteralPath $path -Force
+                        }
+                    }
+                } `
+                -ArgumentList @(, $fragmentPaths)
+            New-DevConfigStep -Name 'WinUIPluginCleanup' -Description 'Uninstall the WinUI Copilot plugin' -BestEffort `
+                -Check { @(Get-DevConfigInstalledWinUIPlugin).Count -eq 0 } `
+                -Apply {
+                    foreach ($plugin in @(Get-DevConfigInstalledWinUIPlugin)) {
+                        Invoke-DevConfigCleanupCommand -FilePath 'copilot' -Arguments @('plugin', 'uninstall', $plugin) | Out-Null
+                    }
+                }
+            New-DevConfigStep -Name 'WinSkillsMarketplaceCleanup' -Description 'Remove the win-dev-skills Copilot marketplace' -BestEffort `
+                -Check { -not (Test-DevConfigWinSkillsMarketplaceRegistered) } `
+                -Apply {
+                    Invoke-DevConfigCleanupCommand -FilePath 'copilot' -Arguments @('plugin', 'marketplace', 'remove', $Script:DevConfigWinSkillsMarketplace) | Out-Null
+                }
+            New-DevConfigStep -Name 'WinUITemplatesCleanup' -Description 'Uninstall the WinUI dotnet-new template package' -BestEffort `
+                -Check { -not (Test-DevConfigWinUITemplatePackageInstalled) } `
+                -Apply {
+                    Invoke-DevConfigCleanupCommand -FilePath 'dotnet' -Arguments @('new', 'uninstall', $Script:DevConfigWinUITemplatePackage) | Out-Null
+                }
+        )
+        Invoke-DevConfigSteps -Steps $steps
+        return
+    }
+
     # BestEffort keeps network-dependent integrations from blocking the WSL and reboot phase.
     $steps = @(
         New-DevConfigStep -Name 'GitHubCopilotProfile' -Description 'Add a GitHub Copilot profile to Windows Terminal' `
@@ -146,15 +227,18 @@ function Invoke-CopilotPhase {
             -Apply { Install-DevConfigWinUIPlugin } `
             -BestEffort
     )
+    if ($Script:DevConfigAction -eq 'Partial') {
+        $steps = @($steps | Where-Object { $_.Name -ne 'WinUITemplates' })
+    }
 
     Invoke-DevConfigSteps -Steps $steps
 }
 
 # SIG # Begin signature block
-# MIInQQYJKoZIhvcNAQcCoIInMjCCJy4CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIInRAYJKoZIhvcNAQcCoIInNTCCJzECAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDckJMHBHK8yCIa
-# 8V/k7z+gmi4eMEnhD7jwy+Sh5wipHaCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDJevIvOKJZj0Bp
+# uhbmAUGClZO8ZJd0p+mRcKmKClWXzaCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -222,66 +306,66 @@ function Invoke-CopilotPhase {
 # vZGtqa9FSL2RazArA+rDPuf6JGYz4HpgMZHB4S6szWSKYBv0VisCzfxgeU+dquXW
 # 9bd0auYlOB58DPcOYKdc3Se94g+xL4pcEhbB54JOgAkwYTu/9dLeH2pDqeJZAABV
 # DWRQCaXfO5LgyKwKCLYXpigrZYCjUSBcr+Ve8PFWMhVTQl0v4q8J/AUmQN5W4n10
-# 1cY2L4A7GTQG1h32HHAvfQESWP0xghndMIIZ2QIBATBuMFcxCzAJBgNVBAYTAlVT
+# 1cY2L4A7GTQG1h32HHAvfQESWP0xghngMIIZ3AIBATBuMFcxCzAJBgNVBAYTAlVT
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIHzHAx3558+68d9AgVWvorjK/W2gxklQokc8clE4fq+rMEIG
+# KoZIhvcNAQkEMSIEIGd467fM/wYFpIeOzE3FXRaO6KY6VkvdttClgACfdYwQMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEArfL7pztF1MB+rlo5
-# +JSzX18Sf3LZ3VFyxeBSLw4HSxAnGrOf32Gd7cKV6uagQGOGvqdYK8U/3SgbxKnM
-# a8agmpaineRD98hkv2NCDiRSqRjp2TgeudKjsv42Tunxu2FbS/0+bbSdd9yQ6UAH
-# 9tvwqZhGisbq64IvM/y8U37uJ0oELG4FWToWqs20IgJW6SsIpHgPmkwu8zGnm68O
-# FGR0h16Ege+au8ZT98xGsrigOIOLDP3Umuulj1WTrNdUQ50e+GDizPYy3tWJT8wK
-# NgreLiqKD+nB+pl+0GEm0MCdPO+GAd1TcT6ddeJpiRTvID9/roRH2qvy2DwLqBei
-# nYqfRqGCF60wghepBgorBgEEAYI3AwMBMYIXmTCCF5UGCSqGSIb3DQEHAqCCF4Yw
-# gheCAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAGnci3K3YVKSTV
-# cpzkwWyOBqyWEWXFRRU6RwyEU3eCigIGaokJ3SZLGBMyMDI2MDkxODE2MTEzNi41
-# NDdaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAXHRqqPsmZ4M20mic
+# oOat6BwRangnSev5fJ18OV/5TCvrjJdug2EVSEjBPqagSJgwsTZ5CKta75SO9Cqp
+# YCu53sjKASo3s46R52Nwy3BdvCv+yF0JhWIjURcEHTBov8eAZaEYndkpOQ3Kr2Ki
+# zJeTS/wH4PKhsyGI0gE/pr4yDhZrgd04iPP76MLXsLa3sV4NThC2VbYVwPWmM5tl
+# GSy5zKggGtXgUtzqppJjp7ItAB4Sge6RjHDeYTjbDk9Q7rT8nb6m4dfB+bduFEZ4
+# +GAUKvFdtB3KbyfPsvWHc7oxxYYtPH4HcpPd+IL2JANljHastSxDI6pZ+EpPQwtH
+# jXgV6KGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
+# gheFAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCC6vHBATvvhk8Nt
+# 5Y5KjkD+413ELRu1LJ03OaYIBI7PHgIGaq9vGOcyGBMyMDI2MDkyNTIyNDc1OS41
+# MzRaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
-# MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEfswggcoMIIF
-# EKADAgECAhMzAAACHUvAkoc4hX45AAEAAAIdMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo2RjFBLTA1RTAtRDk0NzEl
+# MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEf4wggcoMIIF
+# EKADAgECAhMzAAACHAlVFdfDWQfRAAEAAAIcMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
 # BgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25k
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jv
-# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgzM1oXDTI2MTEx
-# MzE4NDgzM1owgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
+# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgzMVoXDTI2MTEx
+# MzE4NDgzMVowgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
 # DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # LTArBgNVBAsTJE1pY3Jvc29mdCBJcmVsYW5kIE9wZXJhdGlvbnMgTGltaXRlZDEn
-# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjQzMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
+# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjZGMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
 # ExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEF
-# AAOCAg8AMIICCgKCAgEAorSgaAA8oOl4ph574zw29egUN8DDepRHLX8FM1zHNJmX
-# G6KrSqUKwzcKafopuYdPTETTCvb9aJfESuAU0iGNUFI/D6R0kvdfpe2oPX+E3sbT
-# QvGi4JPH5qdIYUaJ45V/4bqe8eNvbWzpC+ZKjH193DeiI1XAI918JoQmBhlEXo/T
-# on1721luZJgincsf5LjMY3jX84WyXUSX3dsS7h/7xVI+w1yjg7pa+0y3o/me2Tsv
-# 6UJUdSTQap5ORGSfCnclnP1z3IiiWIWr3Vo7aIPWsgJzq3m5GxpxUHCQk8qzUhk5
-# 0y/uB+LGE3WIK2C77iy9iFsSfSLUnyMEzGRDW9mXHT4PH7Ozz6CHqQEiNvwcHqlv
-# lCh1pHQh1NXQSAqOoVBs5mi6easf6yxWTfe5DrR79503r8pU6VqC2Y9XMRU4wH9Q
-# bYXYsIUZ33Jmndy22W1LBDAbxBPQHCBlncGDU3BgdhVUVLe80mggFO98FdkWho67
-# w4kPdCTRkvdvkY8PrQYE/nQjHXCa0g7LcMttZb6ejMHfQ+tUWXv6+nZ4Ynkr2Oka
-# xclFCw4RIYNMWD26AWbQj/WEdzga18fKtw66L5gzXPza6jFBfPJeKE3H8QAuwpir
-# mH4ms+5nUjNNQOmNgqJn0U1+3Yn7ClswD79YN0r3fdbYBMDApBZJpNlK7q7HXRsC
-# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBSEWfBxNEamZtXm8gl92Yq80jfxXTAfBgNV
+# AAOCAg8AMIICCgKCAgEAow0xEAUaFIyyLIXeFzeI8IKyBON2u0Dr02ISE5p9G5CU
+# XfnFu2S0E1gWCMvDWpopX6lRxjmgnqaL3BtnWlBVTo8xUNRZu23ie4YBMAJB7Ut6
+# mnqnHVwvDJxGO4TD3SnrCd+yg35B9QFejq3o4+OByvXjynaypZyukcQaLsKQvoxE
+# 8ElHH7zcOXEJWmU3rnXzaW/S4SH3OPhoUbTTcy6nUgKx5pRWiQ24UEPLYzcxGJjq
+# jkz+GiCWGPFHDMdW86laWvmCslouQPsN2eBk8dxJcEZmW4l6p4TthoXcfexEA9Yd
+# YaMz10aMhZNpdsNaDtDQUMDEC3k1D1My69MXSPlUmD9xFyDlkXiVa7BCEp3XcVtq
+# TgzHGwr28JD6oE7zEPYeuZOiuCBXTZSo/wk3tbDlsESbIPV6inYqrzxiMYqlxfCd
+# zC3Cimh9/NT/Lk9/aU+Iyyc9b3OaT0dZ8wgLaVDCGELRMrqyImdFHv0MudctzW/k
+# PsV3Ja9ufpKWujEiN3CW//X8hFa9j5ImNeQzcMit3MoSaoGwnbiZJX1IyibIphlq
+# ccXFk4oTTSOQBsAUw8U0gwOnM5UJD8mBUBd65Np6NBkx2cviJ4I34GyXFCWyy5Ft
+# 1QsBYyVfAG3KOhCfPHQf8lQzJvLr57YW0bD/xVs4Ag4gTS6KZNyFEfX9jFdRlr0C
+# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBRa3mOCzB8u7zpvDh8MGKVYLCk7ZDAfBgNV
 # HSMEGDAWgBSfpxVdAF5iXYP05dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5o
 # dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBU
 # aW1lLVN0YW1wJTIwUENBJTIwMjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwG
 # CCsGAQUFBzAChlBodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRz
 # L01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNV
 # HRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIH
-# gDANBgkqhkiG9w0BAQsFAAOCAgEAkdweB4yxvLspLKq0D+miyD4Q0EcxVFpNZuJx
-# iR54gWRkeTDDuymNeB03JhlsBpbwSYJ5uZSgDBCvwHED2VL8lJpFlOprJzxsXWC2
-# NTfA+O+PO5Fk5jw6LHh6jeBADDEdQAx3Hqi7Zm0JwvQ93z5f6dtxkm29WqOcHYXR
-# XfAQwy1hSrLXyfeblqR66jpP/9n0fCkWU4ggsUjQpQ2Ngj1DV09J4Y3y7p9Nd81+
-# Xs6qYo++7RKm8qiB/5NDeigOLjlAeFgiEXIRUJW+mJyqpQw+OORlaqcFjR8Hu0G+
-# /7bMdek68YX+kPpDBk7Ue+I/xgiYJ1xcDRBn/vczLtN72+RIlD4UgXYLuBSCk//p
-# DEPX5z39Cr+rkc6E4Y28FPk4BhloAyvp628P4xfElQY8TcxraUbZShypocE6ny95
-# D1K1BkltZmrHVKCxmglnuOlM15NKIrXFlXCzdqpCtIwQ417wNAVF/QDPvzzbumPd
-# Ti6fb0tLbScYobV6zvbBsMsKEME4Tj1b9oIXC8dybJq4nbboEXYpRwi1QAbpSNrn
-# +PxGW9uf1q63FnMJu4gm3Oh63njW/iVf723quzyHrSijWMgY0HiRiHQi0Jyu0h8M
-# dhRUp7mxbmLQckPiOFwAlIaUN/k725y/aLWpkRU6fqmLlEOyH5WpyLd23AYy9r8v
-# +Qoba6swggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
+# gDANBgkqhkiG9w0BAQsFAAOCAgEAklb6w/deaid3BujQCtWFBe0n9pkyRy+yyWEg
+# 70iDwoJ5u0e0O+4GerNzdZb1zTPsHJ8EGMyo1K7ytL21+pmdFMTl19PC8OJ5Y2p+
+# XKUQy2dD+hggRMmJgDQsgbOCxHYeO+jg4t+vg61wUrovzzLkH3z0PJXXvoNuBj9L
+# da9CiNMd60451Kube99ArSf6ZMj3t0p4rFbgSazDs+8TJ+8KA5GVaYjPHj9rlMuI
+# 3WjohEc9apnQ6hMjMck3jlHZIwluVYeUQE0qjmApfMtTAEzbMUdY8sLTunL1GkbD
+# SeKn9O7llBGnNtyM1uM9Mdv1VyWh0z/IriQKIjntqqGyoF0HvDHOFZCyUDBPLfly
+# iu7Y1zQ/sPounsb96aBfQdq3h3LOn6t+m9EnNz/G6MzzWvpJk6YgTHTIqeQN/F/X
+# piPvbfek3nq/PYbL3au+kBfRUHiCFXSvt6lor0HC626vUmz9ZNPOxwEWLuccomxs
+# y3JwWH79vsM/7ARqoG5h6d6NahfaOuRP4XI9xtdH3Pa/NCLyQjxKXyLxzwQzjddk
+# X2EpTJnlypuhPmEdea59Uz2E303LxyXSnKBvGsAnyWYAfnejr3YAiL9YrN2l2dn1
+# 98RpA4DCm9QtZYiwC0q2fuUvui34PfPIUZByf7wHuuWu50hY9WLx1kOMI8xyo7AI
+# 6TaNrnIwggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
 # DQEBCwUAMIGIMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
 # A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIw
 # MAYDVQQDEylNaWNyb3NvZnQgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAx
@@ -320,45 +404,45 @@ function Invoke-CopilotPhase {
 # JLo4S5pu+yFUa2pFEUep8beuyOiJXk+d0tBMdrVXVAmxaQFEfnyhYWxz/gq77EFm
 # PWn9y8FBSX5+k77L+DvktxW/tM4+pTFRhLy/AsGConsXHRWJjXD+57XQKBqJC482
 # 2rpM+Zv/Cuk0+CQ1ZyvgDbjmjJnW4SLq8CdCPSWU5nR0W2rRnj7tfqAxM328y+l7
-# vzhwRNGQ8cirOoo6CGJ/2XBjU02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDVjCC
-# Aj4CAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# vzhwRNGQ8cirOoo6CGJ/2XBjU02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDWTCC
+# AkECAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo2RjFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaIjCgEBMAcGBSsO
-# AwIaAxUAuoO+BKbfXzqyfi9GLEdWHkCLeT+ggYMwgYCkfjB8MQswCQYDVQQGEwJV
+# AwIaAxUAWmTiA01u5mxq/nVxiRJLMOskVGeggYMwgYCkfjB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5XxqUwIhgPMjAyNjA5
-# MTgxNDE4MTNaGA8yMDI2MDkxOTE0MTgxM1owdDA6BgorBgEEAYRZCgQBMSwwKjAK
-# AgUA7lfGpQIBADAHAgEAAgIsEjAHAgEAAgITmjAKAgUA7lkYJQIBADA2BgorBgEE
-# AYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAIDAYag
-# MA0GCSqGSIb3DQEBCwUAA4IBAQBD3s2Y/yl5WI0YmM7RZIprbosLdmmC88rLkhIF
-# /pAY4SlF8nx0RdemGv5ApLDHIxSugtrkmLdQZUAuAz/ziAISPmh2FT+sZXYRFPSM
-# ZhrN18PWxPdY2SeEU2L1YFqokOK2OQlIOrJjvELuz6HMMb2ObGLgsurfaGd1tWAE
-# /saEOVNUFo989unJfJE9xnVmB5tgm6AWeh69qe6G1QONfA7ASo0F7tbBvz0rnDel
-# 2dBYGMFmsab7xC82afWRri9tgHOGAbMr7cksldsgnWRPJAuPyV1nkJDqUpPiPWkf
-# GQVFxw6XbOrEU3Ne83zMXyxvhY20qrTyqWXYI1mIJp+Oqx4yMYIEDTCCBAkCAQEw
-# gZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
-# B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
-# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIdS8CShziFfjkA
-# AQAAAh0wDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG9w0B
-# CRABBDAvBgkqhkiG9w0BCQQxIgQgVCfj0Sr4NzXFuVL5AIBkwL22qvuSDCwRHFDO
-# DcvdAh8wgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCxtpXMXEiLJzrqM77e
-# p4rTNwrMOj6gpWN9hZvpj5QFUTCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYD
-# VQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNy
-# b3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1w
-# IFBDQSAyMDEwAhMzAAACHUvAkoc4hX45AAEAAAIdMCIEIEr+eiL2D+XlTlv0X3Gv
-# LJxjxm94mYoDDfYHPX375FN3MA0GCSqGSIb3DQEBCwUABIICAE/B+OoNyp1NoHi/
-# DQhHPpoOVA39MJSlIMMAM7aoagsgcN78P0xX6xPld45FIJcH6+FVbTbux4kG09iB
-# gtVcM6O5PJdHHwK1wtj2IDR9IrrayOK4G+k8/GWkTJ85fRVZtCLi1+Nj52EWvQUR
-# rL7wen1EsveUEr+eI2ruvqyI2gIpMK6b47IdCc0LLjNKspvuF9x7a4GaL5i1Vnf9
-# OizGHguUrVue2ZmWPnZQmBNK35idm+1d686oeCaTt67DmAzeYJ7N15A62z5OwKOI
-# YoRQlv7SL6NSIolzZjLFs0uV6Z1FcOdtuJ9xWACe52I3sBfli/CNDhaKbwrXidYA
-# iLnI8+fFiZQECG2kIxKgd45rBg95xgAO1LQzLKKsUQY5d0brtQbfaUqw3wNIJ/Rr
-# WBP6c6U5shi0rWKGHESVuCNaabthPwFhXpC0piKuKydeOLKq03xtbV37mea0AdAs
-# Lnw3gMcULWtsWItNThtCSS8CqR88oE2BFFjkh8iuMMIU3oRuQSeIlwffbHSPC7R1
-# J3N80US2nrtIy0PrLOKZWOiPYxFlwh54JkuhnaBWibpbfz05nLfLS+wqDdnPh7ps
-# A3I/N/C1sRABi/kV97yjPalR6V2JkKz0RWTV+CnurViVdhRaVfZWG1xfNeJVTePs
-# amIlhDHzPSFCX78RXqPB5Q6SlMmw
+# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5hLScwIhgPMjAyNjA5
+# MjUxNzI1NTlaGA8yMDI2MDkyNjE3MjU1OVowdzA9BgorBgEEAYRZCgQBMS8wLTAK
+# AgUA7mEtJwIBADAKAgEAAgITKgIB/zAHAgEAAgIS+zAKAgUA7mJ+pwIBADA2Bgor
+# BgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAID
+# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQA/M5GGuwrml08F0AaIpvlq8khXkiNhOdFv
+# zhTGwIrKkkET7FTQtznwy0A/dAB9PNpS6ImQT48PoCct/b70OWKwHETIn3Hp/nye
+# qyIKd06cwI3EM2B2ZJy4zFe1DujeKJKq9VmYaTiiJ8g/OM3xSfmRajWiBNuzyOGX
+# q8fntjNPXTCzITe3ZKUQ6WinZMOL6Dmb16XpYLXNf3UINagylaTh6uwPVxh7no1v
+# eRzTOUfdJfazzRrvRISRyaEkZ1+BOHZSuQFTjvsPN5aX9ZIeF/VeL9AonhzjVHsJ
+# 8Wc1ATkTCOm/P/A/pe3JNnyYS1CwX1Uy/zYMPJFj3Q9gwIO4Q+91MYIEDTCCBAkC
+# AQEwgZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNV
+# BAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQG
+# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIcCVUV18NZ
+# B9EAAQAAAhwwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
+# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQg3iiZr7NrxJ4su9Vn9JEAyivXodVAZJPH
+# 476qcVPPWe0wgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCgIGkmNhdo7+KE
+# 7dWhI+E2Ctx2RLWoYvvJodCIciHHaDCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
+# EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
+# aWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0
+# YW1wIFBDQSAyMDEwAhMzAAACHAlVFdfDWQfRAAEAAAIcMCIEIHeIon9dd8kSbI29
+# hu2m1+ivmWiZkoMmR2OSYAAFz7PvMA0GCSqGSIb3DQEBCwUABIICAJ3hzw1O1mvW
+# LIUKestSTnPgI9oprXxw54iqE6A9xhK+9LNRoMVU9wdqTJ5w5c5zGhY7ou/4Wlsu
+# xK2/LpYb8tY8Pf4pymz88YetpHdS3yHIxlk9MhcGIeq9bntUDyaxjnX1VD87QH6M
+# wj5dZ/5zKzujgoCtXrl0AfSoKemUc+1FnOggrXv42Qy6OR9Zz3X7s/TuxOBJlOxL
+# YjEmeLQvup1PJp0DKGZPh9u16QLSxdWA1+459HxQqSnllXDy3Pt7u1Wr3GR7Bd3n
+# TqZNc5MloBWuV/OTNeueuuifrJshpJ8we6EEUbu9X4QZt7oYVq77Zqm1gE9KS7+m
+# Go7eyQix72721B1+/UOLbjTbAKFY4s1vcPdAdOur8haNuxOPjQbfOa0z9UyIRum0
+# hbj/o2r/PfXOxfi73j9fhwmCLTOyB5YquuzL7OUTsM5veEKZOXdZKq4B92YS+wn+
+# oYj4T1KEbuWO72JWgS4351TzFrpUCKdm0qS34MvotsAAb2uZz4KW6L8B4/HRZPOH
+# NhkvEY7+Xeh3IRhdjPjSf/e7oNgB5QfCCZY1h76CZU1mgkfntOoWIMmQXvC3emP5
+# Zkc/g4C846gJLYMLY0w6L+gctbL0Ldmhq1MJXzBN22lkJ4xvD7wJNO2ntRXq5epo
+# or7wzFVwpLKpC7x1wb3TVEGXnU7OZu+k
 # SIG # End signature block

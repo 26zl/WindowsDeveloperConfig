@@ -20,7 +20,7 @@
 
 ---
 
-Go from a fresh Windows install to a fully configured dev box in one command. These CI-tested setups install your tools, settings, and shells the same way every time — so any machine can be your machine in minutes.
+Your dev environment should help you ship, not become another project to debug. Try the new Windows developer configuration and spend less time setting up, more time building something awesome.  
 
 ## 🎯 Pick your setup
 
@@ -32,27 +32,6 @@ Three developer setups live in this repo. Pick the one that matches what you wan
 | A polished WSL shell: zsh/bash, Starship, CLI tools, and a themed terminal profile. Interactive or unattended. | [WSL Comfort](#-wsl-comfort) |
 | A single language toolchain: Node, Python, SQL, PowerShell, .NET, Rust, Go, Java, PHP, WinForms, or WinUI 3. One command each. | [Workloads](#-single-language-workloads) |
 
-Most of the single-language workloads use [`winget configure`](https://learn.microsoft.com/en-us/windows/package-manager/winget/configure). If you've never used it before, enable it once:
-
-```powershell
-winget configure --enable
-```
-
-> [!IMPORTANT]
-> If `winget` is being invoked from a **non-elevated** environment, the Microsoft Visual C++ Redistributable ([aka.ms/vcredist](https://aka.ms/vcredist)) must also be installed — without it `winget configure` fails with an internal error. Install it once with the command for your machine's architecture:
->
-> ```powershell
-> # x64:
-> winget install Microsoft.VCRedist.2015+.x64
->
-> # ARM64:
-> winget install Microsoft.VCRedist.2015+.arm64
-> ```
-
-If that fails or `winget configure` is still not recognized, see [Troubleshooting](#-troubleshooting). Windows Dev Config doesn't use `winget configure` and needs none of this.
-
-<br/>
-
 ## 🖥️ Windows Dev Config
 
 *Turns a fresh Windows 11 box into a clean, distraction-free dev workstation in one shot.*
@@ -61,25 +40,31 @@ A set of PowerShell scripts that installs dev tools, applies opinionated Windows
 
 Open any PowerShell window — elevated or not — and run:
 
+### Standard
 ```powershell
-$url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
-& ([scriptblock]::Create((irm $url))) -AllowUnsigned
+irm https://aka.ms/devconfig/standard/setup.ps1 | iex
 ```
 
-If you're not already elevated, setup requests UAC consent before starting. It requests consent again when resuming after a reboot. Expect about 30 minutes on a clean machine.
-
-> `-AllowUnsigned` runs the source copy under `src/` instead of the signed copy at the repository root.
+### Full experience
+```powershell
+irm https://aka.ms/devconfig/full/setup.ps1 | iex
+```
 
 > ⚠️ **It will restart your machine, once.** Enabling WSL needs a Windows optional feature that requires a restart. You get a 10-second warning, and a scheduled task resumes setup after you sign back in and accept the UAC prompt. **Save your work before you start.**
 
 <details>
 <summary><strong>What you get</strong></summary>
 
+### Standard Experience
 - **Dev tools:** Windows Terminal, PowerShell 7, Git, GitHub CLI, GitHub Copilot CLI, VS Code, .NET SDK 10, Python 3.14 + uv, Node.js LTS + nvm, Coreutils for Windows, Windows App CLI, Oh My Posh, and PowerToys.
 - **Terminal:** PowerShell 7 as the default profile, Oh My Posh in your prompt, Cascadia Mono NF as the default font, and a GitHub Copilot profile in the dropdown.
-- **Windows settings:** Dark theme, Developer Mode, Sudo, long paths, File Explorer defaults, Start/Search cleanup, Do Not Disturb, widgets off, and Edge policies.
+- **Windows settings:** Dark theme, long paths, File Explorer defaults, Start/Search settings, and Do Not Disturb
 - **WSL:** WSL platform + Ubuntu, including the restart and the automatic resume afterwards.
 
+### Full
+- **Everything from standard**
+- **Windows settings:** Developer Mode, Sudo, widgets off, and Edge policies, additional Start/Search/System Tray settings
+- **Remote Desktop:** Enabled and firewall settings set
 </details>
 
 Full details — every setting it changes, how to undo them, and troubleshooting: [`windows-dev-config/README.md`](./src/windows-dev-config/README.md).
@@ -117,7 +102,28 @@ Full details: [`wsl-comfort/readme.md`](./wsl-comfort/readme.md).
 
 ## 🧪 Single-language workloads
 
-Just want one toolchain? Pick a row. Each workload ships a `configuration.winget` file plus a matching `install.ps1` shim that applies it and refreshes PATH in the current session.
+Just want one toolchain? Pick a row. Each workload ships a `configuration.winget` file plus a matching `install.ps1` shim that applies it and refreshes PATH in the current session. 
+
+Most of the single-language workloads use [`winget configure`](https://learn.microsoft.com/en-us/windows/package-manager/winget/configure). If you've never used it before, enable it once:
+
+```powershell
+winget configure --enable
+```
+
+> [!IMPORTANT]
+> If `winget` is being invoked from a **non-elevated** environment, the Microsoft Visual C++ Redistributable ([aka.ms/vcredist](https://aka.ms/vcredist)) must also be installed — without it `winget configure` fails with an internal error. Install it once with the command for your machine's architecture:
+>
+> ```powershell
+> # x64:
+> winget install Microsoft.VCRedist.2015+.x64
+>
+> # ARM64:
+> winget install Microsoft.VCRedist.2015+.arm64
+> ```
+
+If that fails or `winget configure` is still not recognized, see [Troubleshooting](#-troubleshooting). Windows Dev Config doesn't use `winget configure` and needs none of this.
+
+<br/>
 
 | Workload   | Installs                                                                | Run                                                                                                                            |
 | ---------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -141,14 +147,6 @@ Want the PATH refresh in your current shell? Use the matching shim instead of ca
 ```
 
 > **Heads up:** WinForms and WinUI 3 pull down several gigabytes of Visual Studio components. Fine on a real workstation, painful on a small VM.
-
-<br/>
-
-## 🎨 Command Palette extension (coming soon)
-
-A [PowerToys Command Palette](https://learn.microsoft.com/windows/powertoys/command-palette/overview) extension lives under [`src/future/cmdpal/`](./src/future/cmdpal/). It reads the same flow list as the rest of the repo and surfaces every flow as a launchable entry, so you don't have to remember which `configuration.winget` to point `winget` at.
-
-See [`src/future/cmdpal/README.md`](./src/future/cmdpal/README.md) for build and install instructions.
 
 <br/>
 

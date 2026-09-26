@@ -1,29 +1,25 @@
-<#
-.SYNOPSIS
-  Microsoft Edge policy tweaks: blank new tab page, no first-run experience.
-#>
+[CmdletBinding()]
+param()
 
-$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
+& {
+    $ErrorActionPreference = 'Stop'
+    Set-StrictMode -Version Latest
 
-function Invoke-EdgePhase {
-    $tweaks = @(
-        @{ Name = 'EdgeNewTab'; KeyPath = 'HKLM\SOFTWARE\Policies\Microsoft\Edge'; ValueName = 'NewTabPageLocation';  Value = 'about:blank'; Type = 'String'; Description = 'Set Edge new tab to blank' }
-        @{ Name = 'EdgeOOBE';   KeyPath = 'HKLM\SOFTWARE\Policies\Microsoft\Edge'; ValueName = 'HideFirstRunExperience'; Value = 1;          Type = 'DWord';  Description = 'Disable Edge first-run experience' }
-    )
-
-    $steps = foreach ($tweak in $tweaks) {
-        New-DevConfigRegistryStep -Setting $tweak -Reset:($Script:DevConfigAction -eq 'Uninstall')
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $bootstrap = (Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/windows-dev-config/bootstrap.ps1' -UseBasicParsing -TimeoutSec 60).TrimStart([char]0xFEFF)
+    $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($bootstrap)) -SourcePathOrExtension '.ps1'
+    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
+        $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
+        throw 'The setup bootstrap failed Microsoft signature verification. Setup was not started.'
     }
-
-    Invoke-DevConfigSteps -Steps $steps
+    & ([scriptblock]::Create($bootstrap)) -Action Full
 }
 
 # SIG # Begin signature block
 # MIInOgYJKoZIhvcNAQcCoIInKzCCJycCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDRmPciR0ie034Y
-# s7l0zxA1ksSzJ0iwvx8sJ+f3cXuvK6CCDMkwggYEMIID7KADAgECAhMzAAACHPrN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA4Bj0OneXVa6KX
+# LVTMrntNucAzhMbbBee3W4hXE9dax6CCDMkwggYEMIID7KADAgECAhMzAAACHPrN
 # xZvoL37EAAAAAAIcMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQxWhcNMjcwNDE1MTg1
@@ -95,19 +91,19 @@ function Invoke-EdgePhase {
 # MFcxCzAJBgNVBAYTAlVTMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # KDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIc
 # +s3Fm+gvfsQAAAAAAhwwDQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwG
-# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIN7f2TX+qQQ0qwIXyJNi4KRWau90
-# PlyjVyI+S3wRvWAuMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
+# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIKsh+VFsAQnaU3gqXZcmXE0t1F6p
+# NMMvr0K+8uHMGQfKMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
 # AGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAE
-# ggEAdfnzEoeIaBrMkdKqhsy0a/EKQd/4g2ffCu5WHC1+bDFU2+c2Wl81+QMFgA5v
-# proAkXFP0hXOs5ngsC4NtT4MlIFDlANvU90luH96W+kG+CWmo61f90F66eFMcRng
-# ktQDrfRLi96HYLNxkfYfcN1K+vkxwtU51bb4oyxDbHXLZG9J3ctMApTvcm2vdyyC
-# qkremcSytLyGvliZ5d/FkLt+eS/USbaKCs7UuuSA5YzDn0dxWcD53gnFr1TTsU+A
-# NrGzgIdbBciZfiiztrGWb8GD5/6WsU/YlUdoqGRfUa3Xn+Dt3d3aDcmLfhoONixs
-# Wu3ygf/IHqP+h4l5D6K/dri9cKGCF5cwgheTBgorBgEEAYI3AwMBMYIXgzCCF38G
+# ggEAtptEnhKNVPLag4+7TMJovgFQNJwAJH8lu0lAYqCVeuO+NtBcR2ZFvVB/6K3a
+# LuSVqNp/RUWlVaOsULEYyOaLqqcZx/cOnWVF499t/gsDMfcCaA6tcVZ2xehUI5ab
+# J9aV77aIMrrRrcxzAGnvtH3OQmm2qD8a8/ykcWzZdfuLU0BQ7la35fvDQJusM0DF
+# sHiiw0tUhomDmuS67BIi8hNPjp52kdFcaCOEdPPrzQ/FE15qw0b5NzuaJ1Utl7hY
+# 63NCuRzkiJHjlFDf/Y5U+v2Tiqtko/GWBW7v+hjA2RQFmQKJpnxrIQU73gyVbBfJ
+# 2SU8lT0CUkpJfiOOHbCdB6An8qGCF5cwgheTBgorBgEEAYI3AwMBMYIXgzCCF38G
 # CSqGSIb3DQEHAqCCF3AwghdsAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
 # 9w0BCRABBKCCAUEEggE9MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQC
-# AQUABCAxfR0XkxSnDUrQAMADLAJ1kwxSlLCiFFNH9AlhPxpQMAIGaqlr/2/yGBMy
-# MDI2MDkyNTIyNDgwMS45ODNaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
+# AQUABCAGAkGJRfGcfRFIFQAQb774VJ+Oj/GhK1eohiPPr1dcmwIGaqlr/3CEGBMy
+# MDI2MDkyNTIyNDgwNS4yNjRaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
 # MBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMV
 # TWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmlj
 # YSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046OTIwMC0wNUUw
@@ -212,22 +208,22 @@ function Invoke-EdgePhase {
 # ZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNy
 # b3NvZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAiNP2WAkU8/+KwABAAACIzAN
 # BglghkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8G
-# CSqGSIb3DQEJBDEiBCBn8ksRgrSQ3DU9IjDIOLFcODeHmb/JuFq2gpvncMHcsTCB
+# CSqGSIb3DQEJBDEiBCCWu9nxxVJFT5LkMCkW7xaMf/o5myFiFVlLn2Zs3X+E2TCB
 # +gYLKoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIJbwMywRbvcGiynjnwjAqcaD47yY
 # vebKZRAvtEAR5u6zMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldh
 # c2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBD
 # b3Jwb3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIw
 # MTACEzMAAAIjT9lgJFPP/isAAQAAAiMwIgQg1sebf8GMjrP5iRYdvaF4YACGCg2T
-# mfIfKIbCpBItIF8wDQYJKoZIhvcNAQELBQAEggIAhaAh1w84YHFiQkWj7OrFTr49
-# qxDYASH1y3A8nLDSdv0inJ+VY6pRtDmk5wNpmYDqaALLLeo8F5804nCgI1vNOLJZ
-# z2JiPHAk9GF+6YOQl0ShTY4PtnvFtFtcju4f7vHD442lo1P0MFqYB9d3O4c2dxC7
-# 0NxZ8HwBXJbbSmN+ym1d2Qf0TNNWWScM/DyRC2s0C78I8f+mnwFW0JKKNbCHcow9
-# 9cLT9/LPkBICQmTiYS0IF3Yn5kDstxyFSQlP+YQiuEkhW+UtFUIANJ/Kk/Aj+FJ5
-# z9i6PTShT0WCRZKf3rEXHPmAFB97ZluMx6LuCW2JKjKAqGY4iaj8zIs5Fx1Tmn0e
-# 6faUZsyXUyOqyHJpDoAx8i0JF749AZ1UIzPJTkkqrla0XOyM0fb9FNrsTk22HKOe
-# JVcOdJxAlLQJoHcjxjDQ88XnPaGlgpdBQIgjxLQJ/GPYokov4bk0za3U2LG9nJ7G
-# i3YYPS0CiIjanjh+9tG4zm6bDwUZh59+R7P1Bz0zr1Q36Pe3gymJPaq68LKEvfCv
-# OCk/yC2aZqK8kJ6N4Qh8y0EeQe5pOsFaitghK1LAkytOTE/LsDOGFKyUstPElQ0k
-# 12RDjTLB0BG3SEsozMTTLs4ybivn630yuFObfxjCyus/yzdlydCo4piDLZ4Kufvs
-# 3T39Dcx2mAU+4doMkdc=
+# mfIfKIbCpBItIF8wDQYJKoZIhvcNAQELBQAEggIAYpubC0j8KkR4r7hqKTZRoApQ
+# dIaW6h5asFZtGY7KK36MeeCQMwCIRxjeHKPfXhSoHB9QiXfDKowgm0MM+boQIBBf
+# eUCNw+WVsXfGmbfEVY+bsayP4XD6jEEf3uH0hOCmk7/LlOGAYwNFtG5veG+IiYzV
+# zlIkyDGZpBUWgdz9buWZ7jp6VxB6k1UpuwR/X76yLpHREm8BUt5Mzusb8IbjdD2r
+# vs5ePuvqxsdpJnBr1I9aCtC8dvCyRcHafTkTVQtqQDwYhcoq9fDCALt4L3Qg0s6t
+# tfioYWQRNBWd+8xN3J5/0nRIy63DgOZVpslCRBZ/bqe2+jsRM05TEny7i7dyfT50
+# qjWld3SlKbAEtAjPIGWK4puM7GLIY7K5aXqW5+ef/N5j8CNx6v1kTZwHvSzKzXoA
+# nCFs7v5QJXf1cTKmIGFVBhQz1GojJrmx/UdRkkoD8jkjGzyEap9eL2IlCbkHu4E5
+# 9qThUqyT3lBnvQLI5F3fQrLTWsT2B7eVUylsmfSuo6CEg7x82eYC+1HtmHOlYtxC
+# 13wJWJMBdOGdTMKUA/SsGIT7/2Y41lsAP837/mOpzQ6zpnonqdSmaEBPlYzZ+E8U
+# GYuFdFtsBOUn/pfC9b6UDMqat/Wv9Mr8cyy7C86jeY6EvtGeFjGZtHSU5r1IqYxu
+# BPG6+RTdly5laqNpNZU=
 # SIG # End signature block

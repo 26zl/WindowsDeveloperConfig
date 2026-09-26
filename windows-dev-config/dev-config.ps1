@@ -1,13 +1,15 @@
 <#
 .SYNOPSIS
-  Configures a Windows developer workstation and resumes after the WSL reboot.
+  Configures or cleans up a Windows developer workstation.
 #>
 
 [CmdletBinding()]
 param(
     [switch] $NoElevate,
     [switch] $Resumed,
-    [switch] $AllowUnsigned
+    [switch] $AllowUnsigned,
+    [switch] $ApplyTerminalFont,
+    [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,18 +51,49 @@ try {
 . (Join-Path $stepsDir '_winget.ps1')
 . (Join-Path $stepsDir '_pwsh-bootstrap.ps1')
 
+$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
+if ($ApplyTerminalFont) {
+    . (Join-Path $stepsDir 'fonts.ps1')
+    $pendingPath = Get-DevConfigPendingTerminalFontPath
+    if (-not (Test-Path -LiteralPath $pendingPath)) {
+        Write-Host 'No Terminal font update is pending.'
+        exit 0
+    }
+    $logPath = [IO.Path]::ChangeExtension($pendingPath, '.log')
+    Start-DevConfigLog -Path $logPath
+    $failure = $null
+    try {
+        Invoke-DevConfigPendingTerminalFont
+    } catch {
+        $failure = $_
+        Write-Host "The Terminal font update failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Full log: $logPath" -ForegroundColor DarkGray
+    } finally {
+        Stop-DevConfigLog
+    }
+    if ($failure) {
+        Wait-DevConfigKeyPress -TimeoutSeconds 60
+        exit 1
+    }
+    exit 0
+}
+
 # TLS is configured before any download step runs.
 Enable-DevConfigModernTls
 
-Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
+Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action
 
-# WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
-Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned
+if ($Action -eq 'Uninstall') {
+    Invoke-DevConfigEnsureCleanupShell -ScriptPath $PSCommandPath -AllowUnsigned:$AllowUnsigned
+} else {
+    # WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
+    Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action
+}
 
 # The lock starts after relaunches so the worker process owns the log file.
 if (-not (Enter-DevConfigSingleInstance)) {
     Write-Host ''
-    Write-Host 'Calm OS setup is already running in another window.' -ForegroundColor Yellow
+    Write-Host 'Calm OS is already running in another window.' -ForegroundColor Yellow
     Write-Host 'Switch to it rather than starting a second copy -- they would fight over the same installs.' -ForegroundColor DarkGray
     Wait-DevConfigKeyPress
     exit 1
@@ -71,33 +104,100 @@ Start-DevConfigLog -Path (Join-Path $PSScriptRoot 'devconfig-log.txt') -Append:$
 # Any prior resume task is stale once this run starts.
 Clear-DevConfigResume
 
-$Script:DevConfigResumed = [bool]$Resumed
-$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
+$Script:DevConfigResumed = [bool]$Resumed -and $Action -ne 'Uninstall'
+$Script:DevConfigAction = $Action
 if ($Script:DevConfigResumed) {
     # Restore the pre-reboot tally so the final summary covers the whole run.
     Restore-DevConfigTally -Path (Join-Path $PSScriptRoot 'devconfig-tally.json')
 }
-Write-Host ''
-if ($Script:DevConfigResumed) {
-    Write-Host 'Welcome back. Resuming Calm OS setup after the reboot...' -ForegroundColor Cyan
-} else {
-    Write-Host 'Calm OS setup -- 11 phases, one reboot along the way (expected, not an error)' -ForegroundColor Cyan
-}
-
 # WSL stays last so its required reboot happens after other phases.
 $phases = @(
-    @{ File = 'prerequisites.ps1';           Function = 'Invoke-PrerequisitesPhase';          Title = 'Getting ready' }
-    @{ File = 'packages.ps1';               Function = 'Invoke-PackagesPhase';               Title = 'Packages' }
-    @{ File = 'registry-system.ps1';         Function = 'Invoke-RegistrySystemPhase';         Title = 'System settings' }
-    @{ File = 'registry-explorer.ps1';       Function = 'Invoke-RegistryExplorerPhase';       Title = 'File Explorer tweaks' }
-    @{ File = 'registry-taskbar-search.ps1'; Function = 'Invoke-RegistryTaskbarSearchPhase';  Title = 'Taskbar, search & start tweaks' }
-    @{ File = 'edge.ps1';                    Function = 'Invoke-EdgePhase';                   Title = 'Microsoft Edge tweaks' }
-    @{ File = 'fonts.ps1';                   Function = 'Invoke-FontsPhase';                  Title = 'Fonts' }
-    @{ File = 'terminal.ps1';                Function = 'Invoke-TerminalPhase';               Title = 'Windows Terminal' }
-    @{ File = 'powershell-profile.ps1';      Function = 'Invoke-PowerShellProfilePhase';      Title = 'PowerShell profile' }
-    @{ File = 'copilot.ps1';                 Function = 'Invoke-CopilotPhase';                Title = 'GitHub Copilot' }
-    @{ File = 'wsl.ps1';                     Function = 'Invoke-WslPhase';                    Title = 'WSL + Ubuntu' }
+    @{
+        File     = 'prerequisites.ps1'
+        Function = 'Invoke-PrerequisitesPhase'
+        Title    = 'Getting ready'
+    }
+    @{
+        File      = 'packages.ps1'
+        Function  = 'Invoke-PackagesPhase'
+        Title     = 'Packages'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-system.ps1'
+        Function  = 'Invoke-RegistrySystemPhase'
+        Title     = 'System settings'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-explorer.ps1'
+        Function  = 'Invoke-RegistryExplorerPhase'
+        Title     = 'File Explorer tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-taskbar-search.ps1'
+        Function  = 'Invoke-RegistryTaskbarSearchPhase'
+        Title     = 'Taskbar, search & start tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'edge.ps1'
+        Function  = 'Invoke-EdgePhase'
+        Title     = 'Microsoft Edge tweaks'
+        Uninstall = $true
+    }
+    @{
+        File     = 'fonts.ps1'
+        Function = 'Invoke-FontsPhase'
+        Title    = 'Fonts'
+    }
+    @{
+        File      = 'terminal.ps1'
+        Function  = 'Invoke-TerminalPhase'
+        Title     = 'Windows Terminal'
+        Uninstall = $true
+    }
+    @{
+        File      = 'powershell-profile.ps1'
+        Function  = 'Invoke-PowerShellProfilePhase'
+        Title     = 'PowerShell profile'
+        Uninstall = $true
+    }
+    @{
+        File      = 'copilot.ps1'
+        Function  = 'Invoke-CopilotPhase'
+        Title     = 'GitHub Copilot'
+        Uninstall = $true
+    }
+    @{
+        File      = 'wsl.ps1'
+        Function  = 'Invoke-WslPhase'
+        Title     = 'WSL + Ubuntu'
+        Uninstall = $true
+    }
 )
+if ($Action -eq 'Partial') {
+    $phases = @($phases | Where-Object { $_.File -ne 'edge.ps1' })
+    ($phases | Where-Object { $_.File -eq 'registry-taskbar-search.ps1' }).Title = 'Taskbar & Start tweaks'
+} elseif ($Action -eq 'Uninstall') {
+    $phases = @($phases | Where-Object { $_['Uninstall'] })
+    # Remove tools after the cleanup steps that need them.
+    $phases = @($phases | Where-Object { $_.File -ne 'packages.ps1' }) +
+        @($phases | Where-Object { $_.File -eq 'packages.ps1' })
+}
+
+$operation = if ($Action -eq 'Uninstall') { 'cleanup' } else { 'setup' }
+Write-Host ''
+if ($Action -eq 'Uninstall') {
+    Write-Host 'Calm OS cleanup -- resetting settings and removing developer tools' -ForegroundColor Cyan
+    Write-Host 'Ubuntu and its files will be deleted. Targeted tools are removed even if they predate setup.' -ForegroundColor Yellow
+    Write-Host 'Some uninstallers may request Administrator approval.' -ForegroundColor DarkGray
+} elseif ($Script:DevConfigResumed) {
+    Write-Host "Welcome back. Resuming Calm OS setup ($Action) after the reboot..." -ForegroundColor Cyan
+} else {
+    Write-Host "Calm OS setup ($Action) -- $($phases.Count) phases, one reboot along the way (expected, not an error)" -ForegroundColor Cyan
+}
 
 $failure = $null
 try {
@@ -106,6 +206,9 @@ try {
     foreach ($phase in $phases) {
         $path = Join-Path $stepsDir $phase.File
         if (-not (Test-Path -LiteralPath $path)) {
+            if ($Action -eq 'Uninstall') {
+                throw "The cleanup script is missing: $path. Run bootstrap.ps1 -Action Uninstall to reinstall it."
+            }
             Write-Host "-- $($phase.File) not written yet, skipping" -ForegroundColor DarkGray
             continue
         }
@@ -138,7 +241,7 @@ try {
 
     Show-DevConfigSilentSkipSummary
     Write-Host ''
-    Write-Host 'Calm OS setup complete.' -ForegroundColor Green
+    Write-Host "Calm OS $operation complete." -ForegroundColor Green
     $tally = $Script:DevConfigTally
     $summaryParts = @("$($tally.Done) changed", "$($tally.AlreadyOk) already up to date")
     if ($tally.Warned -gt 0) {
@@ -150,6 +253,9 @@ try {
         Write-Host "  Flagged: $($Script:DevConfigWarnedSteps -join ', ')" -ForegroundColor Yellow
         Write-Host '  These were skipped or could not be confirmed. Running this again retries just those.' -ForegroundColor DarkGray
     }
+    if ($Action -ne 'Uninstall' -and (Get-DevConfigTerminalFontRunOnceCommand)) {
+        Write-Host '  The Terminal font will change at your next sign-in; no setup rerun is needed.' -ForegroundColor DarkGray
+    }
     Write-Host '  A few Explorer and taskbar changes appear once you sign out and back in.' -ForegroundColor DarkGray
 } catch {
     $failure = $_
@@ -157,7 +263,7 @@ try {
 
 if ($failure) {
     Write-Host ''
-    Write-Host 'Calm OS setup stopped early.' -ForegroundColor Red
+    Write-Host "Calm OS $operation stopped early." -ForegroundColor Red
     Write-Host "  $($failure.Exception.Message)" -ForegroundColor Red
     $origin = $failure.InvocationInfo
     if ($origin -and $origin.ScriptName) {
@@ -171,22 +277,22 @@ if ($logPath) {
     Write-Host "  Full log: $logPath" -ForegroundColor DarkGray
 }
 
-# Release the run lock before the final pause so a completed run does not block the next start.
+# Close the log before releasing the lock so another run can start while this window waits.
+Stop-DevConfigLog
 Exit-DevConfigSingleInstance
 
 # The elevated window owns the final pause on both the initial and resumed runs.
 Wait-DevConfigKeyPress
 
-Stop-DevConfigLog
 if ($failure) {
     exit 1
 }
 
 # SIG # Begin signature block
-# MIInKAYJKoZIhvcNAQcCoIInGTCCJxUCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIInJgYJKoZIhvcNAQcCoIInFzCCJxMCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC84SDKnzUn6ouM
-# 0bqVWWOhXEXkdmz9rVDR1WhhlWw5+aCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDPZ/O9lzMGYGnE
+# s1A1d44xQ4zTaeDoIdtb4MqOXbx6tqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -254,142 +360,142 @@ if ($failure) {
 # vZGtqa9FSL2RazArA+rDPuf6JGYz4HpgMZHB4S6szWSKYBv0VisCzfxgeU+dquXW
 # 9bd0auYlOB58DPcOYKdc3Se94g+xL4pcEhbB54JOgAkwYTu/9dLeH2pDqeJZAABV
 # DWRQCaXfO5LgyKwKCLYXpigrZYCjUSBcr+Ve8PFWMhVTQl0v4q8J/AUmQN5W4n10
-# 1cY2L4A7GTQG1h32HHAvfQESWP0xghnEMIIZwAIBATBuMFcxCzAJBgNVBAYTAlVT
+# 1cY2L4A7GTQG1h32HHAvfQESWP0xghnCMIIZvgIBATBuMFcxCzAJBgNVBAYTAlVT
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIF/gYms+8pgBsZLFRG9niGco7O/ZlOuJwSYOQ+gfNO14MEIG
+# KoZIhvcNAQkEMSIEIKAj+pHmZ4qC63WgVaR24VnFbP9PwTI4mLn0MTnXQ85WMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEALlrcIBD5itytsX/L
-# zmk88y03/JlBE1ER9LueTDohvmxPlTUdHGPYOiiASIiGNPAqiFfX7KMocciX6LVj
-# g0U/5VpYP8owvzSpB+6lw0KanJYaOI3WFspKW7+B86NOouKJ+Nw+UzjSvcCh6f1X
-# gnrxlkIn1kZpCc9OYGO5IOfz2AVqsyvgzlrGtdEi9B+Axlod2Fqcpe+wVgYwcxcF
-# 4VkC6A6LSJeLPmuM03iq7cC/wkEpeeE9ppK/9kCg6WA54wSEetu728e2XbeHkPlL
-# /9HZDkAYC4ctsmR1HZdq5H66dfUD9Gyb409uK/uFbNyizd7GV3SXKINVkrmsrZG3
-# zKpNO6GCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wGCSqGSIb3DQEHAqCCF20w
-# ghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG9w0BCRABBKCCAUEEggE9
-# MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCahkVu8FxbkQOy
-# c2t3kEVJM0GhntgHMy0bRMt5cW6XIQIGaqpJcaY7GBMyMDI2MDkxODE2MTEzOC4z
-# MDZaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
-# Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
-# cmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScw
-# JQYDVQQLEx5uU2hpZWxkIFRTUyBFU046MzcwMy0wNUUwLUQ5NDcxJTAjBgNVBAMT
-# HE1pY3Jvc29mdCBUaW1lLVN0YW1wIFNlcnZpY2WgghHqMIIHIDCCBQigAwIBAgIT
-# MwAAAh86cGnkojAulQABAAACHzANBgkqhkiG9w0BAQsFADB8MQswCQYDVQQGEwJV
-# UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
-# ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDAeFw0yNjAyMTkxOTM5NTFaFw0yNzA1MTcxOTM5NTFa
-# MIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMH
-# UmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQL
-# ExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxk
-# IFRTUyBFU046MzcwMy0wNUUwLUQ5NDcxJTAjBgNVBAMTHE1pY3Jvc29mdCBUaW1l
-# LVN0YW1wIFNlcnZpY2UwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDL
-# O8XFOcfGqAqgiz0+AmQmFl3dZ0aTG4UFJkqqNdMHy28DaheCBs6ONufukye5x42C
-# WkzgRIy9kE2VWwEntZ8ZkgyrykC0bIqsID7+6FxguseTXf1Vwvm1D8104VmetoBJ
-# lJ4uGbuyJZUvXDx55nVh50ygLTzZ24WkQsnPpvRZv2kPc39f3bhLyHVtnHsa/W/8
-# 6Vrftd+AfFveA+qN/EY+XGj5c/DPMXCYECb0arYb92dDJWtwzpyBrp4gfHlgY1UE
-# pc4l4AGELrf2J4wrxTzTW+SM8XhV1dOOPrYjD080IbZqL8B+IF0RCdn269YXrGK6
-# QIHipznKZcCS8jN30YAHnTJVN5Zzs6t/2YsqBGDquvDad7934FFTwzvUcO3VoIyd
-# 93XWwvP8/SCFVJh21W8oGQTptGHyly+Fl4henVMVZF1v6osOtirX8GFTiEhnf8nR
-# dOg7yZYAJ0xy9CtDfbXaTn/cf3Lq3N/GCYKFjC+5mUCE+AJhmxMuMdvSUGmKiAFd
-# iPAjUTqsWWBBZJm0eCwgeGJFmmQA+V7/98BKcE+gUL7O9eWRDQwKeAcvo6rxNv2Y
-# 4jKrHA6Z/wi3a/fKUhLCNZES8qGdrpDAm7qh+6FjYxytAbkiKM6uTNy/ULPlwtlY
-# ZoAJDDQP7eYCywwVbNTbHXRBSS+NccC0sSB4W7U67wIDAQABo4IBSTCCAUUwHQYD
-# VR0OBBYEFNk72sGDlH0r5DwvfGR5XwJI8B7bMB8GA1UdIwQYMBaAFJ+nFV0AXmJd
-# g/Tl0mWnG1M1GelyMF8GA1UdHwRYMFYwVKBSoFCGTmh0dHA6Ly93d3cubWljcm9z
-# b2Z0LmNvbS9wa2lvcHMvY3JsL01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0El
-# MjAyMDEwKDEpLmNybDBsBggrBgEFBQcBAQRgMF4wXAYIKwYBBQUHMAKGUGh0dHA6
-# Ly93d3cubWljcm9zb2Z0LmNvbS9wa2lvcHMvY2VydHMvTWljcm9zb2Z0JTIwVGlt
-# ZS1TdGFtcCUyMFBDQSUyMDIwMTAoMSkuY3J0MAwGA1UdEwEB/wQCMAAwFgYDVR0l
-# AQH/BAwwCgYIKwYBBQUHAwgwDgYDVR0PAQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUA
-# A4ICAQBlbu3IoynnPz0K1iPbeNnsej2b15l5sdl2FAFBBGT9lRdc2gNV8LAIusPY
-# HHhUvRDcsx4lbMNhVKPGu4TDLaqNt/CI+SFtGuqdRLpVP1XE9cCLyKrKPpcJFJCq
-# PpV+efoAtYBmIUQcxxwT7WIQ7gag8+rkKvrMkCoRqKS0mKv8J1sKfi85+G2uhZ/1
-# RteSVdYZOZOj+Sb4wzonTCTj7EtgMN/BX35W5dTzd7wJdGepYkVi871dSrC2Tr1Z
-# FzAR7S44drCWZpJ6phJabVNOsNxFJKgSykugOGWzQ318Rr3MTPg2s3Bns+pUPVgM
-# ijd4bUOH2BlEsLMMwOcolTTZqg1HYrdY1jxpUAI9ipjBQRINL/O705Z+/f2LjNmJ
-# QooCVJVX24adpZ519SsfazGoqXGt91bmqKo0fI09Il4sUHh4ih6rpiQDBlyL7vmv
-# CejwVxYevY4qVwTZ/o3gvl+R0lFxYS9feIM4NeG0+WsDZ7jLci5MFeuNwosQY3z2
-# 6Xg1oj0U9u+ncR9uTU+xBmJ8BtlCdhQ13RNMX5P+krRYPB3XCp9Jm6XaO1995q32
-# AIZm1mzBGI6yHlviXaEC5TzGiO1LXuPtXZU2X93oQJbMoe3v8+5CPKrQalGWyYuh
-# 2a3V1pwbj+W0FEmEFPpu8TI+qYO1IIQWUSRvFjXth5Ob02hMMjCCB3EwggVZoAMC
-# AQICEzMAAAAVxedrngKbSZkAAAAAABUwDQYJKoZIhvcNAQELBQAwgYgxCzAJBgNV
-# BAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4w
-# HAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xMjAwBgNVBAMTKU1pY3Jvc29m
-# dCBSb290IENlcnRpZmljYXRlIEF1dGhvcml0eSAyMDEwMB4XDTIxMDkzMDE4MjIy
-# NVoXDTMwMDkzMDE4MzIyNVowfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
-# bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
-# b3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAw
-# ggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDk4aZM57RyIQt5osvXJHm9
-# DtWC0/3unAcH0qlsTnXIyjVX9gF/bErg4r25PhdgM/9cT8dm95VTcVrifkpa/rg2
-# Z4VGIwy1jRPPdzLAEBjoYH1qUoNEt6aORmsHFPPFdvWGUNzBRMhxXFExN6AKOG6N
-# 7dcP2CZTfDlhAnrEqv1yaa8dq6z2Nr41JmTamDu6GnszrYBbfowQHJ1S/rboYiXc
-# ag/PXfT+jlPP1uyFVk3v3byNpOORj7I5LFGc6XBpDco2LXCOMcg1KL3jtIckw+DJ
-# j361VI/c+gVVmG1oO5pGve2krnopN6zL64NF50ZuyjLVwIYwXE8s4mKyzbnijYjk
-# lqwBSru+cakXW2dg3viSkR4dPf0gz3N9QZpGdc3EXzTdEonW/aUgfX782Z5F37Zy
-# L9t9X4C626p+Nuw2TPYrbqgSUei/BQOj0XOmTTd0lBw0gg/wEPK3Rxjtp+iZfD9M
-# 269ewvPV2HM9Q07BMzlMjgK8QmguEOqEUUbi0b1qGFphAXPKZ6Je1yh2AuIzGHLX
-# pyDwwvoSCtdjbwzJNmSLW6CmgyFdXzB0kZSU2LlQ+QuJYfM2BjUYhEfb3BvR/bLU
-# HMVr9lxSUV0S2yW6r1AFemzFER1y7435UsSFF5PAPBXbGjfHCBUYP3irRbb1Hode
-# 2o+eFnJpxq57t7c+auIurQIDAQABo4IB3TCCAdkwEgYJKwYBBAGCNxUBBAUCAwEA
-# ATAjBgkrBgEEAYI3FQIEFgQUKqdS/mTEmr6CkTxGNSnPEP8vBO4wHQYDVR0OBBYE
-# FJ+nFV0AXmJdg/Tl0mWnG1M1GelyMFwGA1UdIARVMFMwUQYMKwYBBAGCN0yDfQEB
-# MEEwPwYIKwYBBQUHAgEWM2h0dHA6Ly93d3cubWljcm9zb2Z0LmNvbS9wa2lvcHMv
-# RG9jcy9SZXBvc2l0b3J5Lmh0bTATBgNVHSUEDDAKBggrBgEFBQcDCDAZBgkrBgEE
-# AYI3FAIEDB4KAFMAdQBiAEMAQTALBgNVHQ8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB
-# /zAfBgNVHSMEGDAWgBTV9lbLj+iiXGJo0T2UkFvXzpoYxDBWBgNVHR8ETzBNMEug
-# SaBHhkVodHRwOi8vY3JsLm1pY3Jvc29mdC5jb20vcGtpL2NybC9wcm9kdWN0cy9N
-# aWNSb29DZXJBdXRfMjAxMC0wNi0yMy5jcmwwWgYIKwYBBQUHAQEETjBMMEoGCCsG
-# AQUFBzAChj5odHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpL2NlcnRzL01pY1Jv
-# b0NlckF1dF8yMDEwLTA2LTIzLmNydDANBgkqhkiG9w0BAQsFAAOCAgEAnVV9/Cqt
-# 4SwfZwExJFvhnnJL/Klv6lwUtj5OR2R4sQaTlz0xM7U518JxNj/aZGx80HU5bbsP
-# MeTCj/ts0aGUGCLu6WZnOlNN3Zi6th542DYunKmCVgADsAW+iehp4LoJ7nvfam++
-# Kctu2D9IdQHZGN5tggz1bSNU5HhTdSRXud2f8449xvNo32X2pFaq95W2KFUn0CS9
-# QKC/GbYSEhFdPSfgQJY4rPf5KYnDvBewVIVCs/wMnosZiefwC2qBwoEZQhlSdYo2
-# wh3DYXMuLGt7bj8sCXgU6ZGyqVvfSaN0DLzskYDSPeZKPmY7T7uG+jIa2Zb0j/aR
-# AfbOxnT99kxybxCrdTDFNLB62FD+CljdQDzHVG2dY3RILLFORy3BFARxv2T5JL5z
-# bcqOCb2zAVdJVGTZc9d/HltEAY5aGZFrDZ+kKNxnGSgkujhLmm77IVRrakURR6nx
-# t67I6IleT53S0Ex2tVdUCbFpAUR+fKFhbHP+CrvsQWY9af3LwUFJfn6Tvsv4O+S3
-# Fb+0zj6lMVGEvL8CwYKiexcdFYmNcP7ntdAoGokLjzbaukz5m/8K6TT4JDVnK+AN
-# uOaMmdbhIurwJ0I9JZTmdHRbatGePu1+oDEzfbzL6Xu/OHBE0ZDxyKs6ijoIYn/Z
-# cGNTTY3ugm2lBRDBcQZqELQdVTNYs6FwZvKhggNNMIICNQIBATCB+aGB0aSBzjCB
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAIFfdBo01WJID+f44
+# WpRgch1/wZQCtDl5vr7YcEx+Y/b96ECjYzXDdP+6IzBchLBdqNlPHxFoBcZoe5dA
+# Z17ufjF4kHZif6P3QcV7djQpCWWF4+FOuVF5KJsmKa3Vs6io/GOFmgRp/Ats3i6k
+# frex/S7PMA4f7Gz7ksvjmkLM6fFRBUvbcg60oeJTpp7qUksSEv5OlQJ4q0fI67pr
+# i33zHeXTKAzBNUxm1bqsCJB++obqUkn8heGuOJxmHBV7H3zTQdj5DwOOHteB9IPX
+# zDeuoGhHROEFb5x3xZGh2IXY0Lu1S7PCUmiF42pciRi6/DKKtyy4gIGmQKyXIiyZ
+# lYopd6GCF5IwgheOBgorBgEEAYI3AwMBMYIXfjCCF3oGCSqGSIb3DQEHAqCCF2sw
+# ghdnAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFQBgsqhkiG9w0BCRABBKCCAT8EggE7
+# MIIBNwIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCVr1DQhpWV8lNB
+# XU/E2+xEC+M8D8Dq9sewlPz8EIttxgIGaqqlEcMeGBEyMDI2MDkyNTIyNDc1OS4x
+# WjAEgAIB9KCB0aSBzjCByzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0
+# b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3Jh
+# dGlvbjElMCMGA1UECxMcTWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEnMCUG
+# A1UECxMeblNoaWVsZCBUU1MgRVNOOkUwMDItMDVFMC1EOTQ3MSUwIwYDVQQDExxN
+# aWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNloIIR6jCCByAwggUIoAMCAQICEzMA
+# AAIpDtVkKrSX8hoAAQAAAikwDQYJKoZIhvcNAQELBQAwfDELMAkGA1UEBhMCVVMx
+# EzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoT
+# FU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUt
+# U3RhbXAgUENBIDIwMTAwHhcNMjYwMjE5MTk0MDA3WhcNMjcwNTE3MTk0MDA3WjCB
 # yzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1Jl
 # ZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjElMCMGA1UECxMc
 # TWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVsZCBU
-# U1MgRVNOOjM3MDMtMDVFMC1EOTQ3MSUwIwYDVQQDExxNaWNyb3NvZnQgVGltZS1T
-# dGFtcCBTZXJ2aWNloiMKAQEwBwYFKw4DAhoDFQBLIMg1P7sNuCXpmbH2IXT2tXeE
-# EKCBgzCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
-# DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
-# JjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMA0GCSqGSIb3
-# DQEBCwUAAgUA7ldqhTAiGA8yMDI2MDkxODA3NDUwOVoYDzIwMjYwOTE5MDc0NTA5
-# WjB0MDoGCisGAQQBhFkKBAExLDAqMAoCBQDuV2qFAgEAMAcCAQACAgKtMAcCAQAC
-# AhO6MAoCBQDuWLwFAgEAMDYGCisGAQQBhFkKBAIxKDAmMAwGCisGAQQBhFkKAwKg
-# CjAIAgEAAgMHoSChCjAIAgEAAgMBhqAwDQYJKoZIhvcNAQELBQADggEBAKoqrnab
-# LY0WQN9GFFQjK7Vf06+HLnIQmd983QhEY0WjiUkX4YGoJNB6DFx5xmt+XmPlhnsn
-# TL0RpQL963a+RcH/xvUW4x7EvS9hu0suaVQ5Za7Yfn5f1iVLprFX8Hlg5pxeg20J
-# OtzvpjPem8IeRIk+MKb/NDOc/3JKs5BKzV62OXy9QBd//SRHL4w5SkQv+H3ImifO
-# cawnPHWjGOTGalBrarc8Oi1dLm2xDAFb5ilSSyTKU7npNjYsxJLcgfnMYDWX/ttY
-# xmqwsVJcVSpHc5rrnAd42/XptwM4INBGMWTq2HlrHxhpyfSlUk0JXs17eksqO5kV
-# 8hZ1IU9rrJ/ti7ExggQNMIIECQIBATCBkzB8MQswCQYDVQQGEwJVUzETMBEGA1UE
-# CBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9z
-# b2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGltZS1TdGFtcCBQ
-# Q0EgMjAxMAITMwAAAh86cGnkojAulQABAAACHzANBglghkgBZQMEAgEFAKCCAUow
-# GgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqGSIb3DQEJBDEiBCB2lmFD
-# vi5GOSyHVJY+7OK6Em9nlRkpkmkXnqmbvMmm4zCB+gYLKoZIhvcNAQkQAi8xgeow
-# gecwgeQwgb0EILAkCt9WkCsMtURkFu6TY0P3UXdRnCiYuPZhe3ykLfwUMIGYMIGA
-# pH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
-# B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
-# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIfOnBp5KIwLpUA
-# AQAAAh8wIgQgXWEGw0HYup0lxbbv2wSVa0QBrjLI1BfYFyOZ/p6pk4gwDQYJKoZI
-# hvcNAQELBQAEggIAv6eIpT7TXPziWuOT9yyWKDwDE65fyoql9K0MHnXrqJP3oDz3
-# 3ruMHl6GTQSDrO0nZTiYfrTQEi9AORAHxddnBkKCFc5Nm1v1D/qs7JmffIPfNKa/
-# jJcoqjjwMiYh15s2xys0m5AubiyjB5lvkrmpqxy6sOEXtfTbwZiO+v19SyxGY0SD
-# Xi9Dr/AUNp129aEpdzf5hb5N+Nx2JfcdLhq6djX8rfyAE64vE8ajnDvNRZlnzhy3
-# ZYFhqjXQIKSX4QROwj/ALA2DOPGiXrE8rPniCoTOeQFQxAT43aP/BKNzOFubZfnb
-# Yibm0gnEBV5vjK6FL8UPNEbxKM3a7M/kJKQSh3krrnsoc024LpLzdmMu5XNWe5Rl
-# aoaMzP18tj38Dexl7SxycEzurXT9jc51rQFYsr/tWIhs3sZwbH5iLvqS4o3GIhgP
-# D10DNu+dFfm3FD2gTBvzH5KY6tzDbL2H+4SmULJJF/lqX3vp6SkomaKdDwnVjh1r
-# XyNNL5FIkZ38CDjmn67hL51LsP4olXQxUKR3KEp3dMmsJHsEymI6BgVTUqyB6Kfp
-# db0brjihUCgy6FoVmsG3tz99UTqPN+LaWBMNomNPpi2h2+8qJg3k1s8YJYWRqFXA
-# v75BDxJe+ownW+BmHc2D4nOspez6zScYf4Zv1BFDh2Mq4DbgeB2v1HyTRHQ=
+# U1MgRVNOOkUwMDItMDVFMC1EOTQ3MSUwIwYDVQQDExxNaWNyb3NvZnQgVGltZS1T
+# dGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAniLR
+# auM9aAmEplGZqWA7GyVhLvvtW23PzM+z2tyNGV+RDjfloqwdBb5xpchUVMpczuUy
+# V2X1PEBTzlPeT9WNTmfCfqrgORvgFkgTq/+PLHJdLPUQaaoEzKv5W8qgc+AjJr1U
+# dkHrwIFaeGtYW5jpvRu2FnsuvDeRea0g2FdMDJYOCMvGEbhYETdngaVV7fSLxWhZ
+# gZ0C2X6Ntimdy/D1hB1IV1OXSzkmaE36qkPwfnXluegAjJ5x4z8WbvrMx4WTC1Kz
+# Fk4LPSewp/A7XpXCo/WjPtGau7ZEgxwq8KOngkn8N3JZLV0Ua3ZrHHGpfEQg4jRR
+# YGbMqcBdmhgBepIONfkJfrYV6ZzjFB+JjwgCWVqdMw1qMLCv2KOYxy9aU/wIGy9x
+# aAMuHG4TiOD29XkBRvo0+7JEthf2/mQAlANRA2fN9CvgbtMsPhaUhsvLaXdbM5N3
+# FGIyKcyBuM96BTZokiTfGHTXeEh7BEeQ5LOW8Yim6b5n6zgN/Y02+xFtk0+8kloC
+# SEn703s7i5kLE1UszbL2qVZR4RNswag8ONPZ7zrYrQhW54YVzX2rc29vhn9rV9rO
+# mAWtedQgv/Pnpib73oF21jbnc2LfHBUaJtD2fnyUYYQX3Uqgqq/EHjhifFWJZsRV
+# 6sdUnQ0pEwkoKbLJBqmcIf+rpgNYOC+83hgTZ4ECAwEAAaOCAUkwggFFMB0GA1Ud
+# DgQWBBQnTUWki/QFvEL2kNtVo0QFyjeDOzAfBgNVHSMEGDAWgBSfpxVdAF5iXYP0
+# 5dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5odHRwOi8vd3d3Lm1pY3Jvc29m
+# dC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBUaW1lLVN0YW1wJTIwUENBJTIw
+# MjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwGCCsGAQUFBzAChlBodHRwOi8v
+# d3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRzL01pY3Jvc29mdCUyMFRpbWUt
+# U3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNVHRMBAf8EAjAAMBYGA1UdJQEB
+# /wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIHgDANBgkqhkiG9w0BAQsFAAOC
+# AgEAPcHO9pX/3Mw4adPU9zxgDDkIcZf8dOI6RO7d/RXqkEp9lKeg1c4YMJ8wqmNz
+# SIS7VGlq3ezcb64WQ3GvieMc760UDTx3kUKZyVXh7Mk7ud4EwZVAdU0SOjp2bfwF
+# ZkfaDCfzQTqgfnfkjm/D8es0YEcJOtrBZDpAeZYoPwzJ2BHkf2plvR3aPL13Cpmm
+# vw20jgB0nX2RbfoqjGXzZZBDp+9f0QCkzb+EKav9hYXIzDJkpCIbIQXQVQdFY5pM
+# BX4VVH+U07iyfbA0eBMgrzmSdweoOyMOlo0McnI8JH87FTE6X7rCeUsHThy/Mhj1
+# mTnj48GvCEl1rOpIlSv+ktPyVW9S6cacmCkREI51P+TnnCrdjl5R3cBVma8AIvfE
+# T2WuhBMXG/yxi39dLTR47tXk5aIWNI8zWUNAQ4ErjGYDFPvBBI7TEDCA55TxhFDj
+# eyx1xx9Ci9BQNNTxFlWSq6/y1Drrg0zRc8OeNxTzKeIJAiBZSnUbnIkdSFzpPl7H
+# uq4/bSRWIFZ/uOAR6Ltl0HuUV99Hn9wEFmtJschg6icxrFd1+fmzUHjFfPIlrpST
+# 6ubIJxhvTvx9fxx+B7DvWShl/1qyaUJhbkK0zkePV473mgtMWhZhrDYPkYW7Q+ak
+# 5J/iEg78NCCfxP1VzXc/8loKJeq+dO4U/LADLqZ4ZBdrsNQwggdxMIIFWaADAgEC
+# AhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3DQEBCwUAMIGIMQswCQYDVQQG
+# EwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwG
+# A1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIwMAYDVQQDEylNaWNyb3NvZnQg
+# Um9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAxMDAeFw0yMTA5MzAxODIyMjVa
+# Fw0zMDA5MzAxODMyMjVaMHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5n
+# dG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9y
+# YXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMIIC
+# IjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA5OGmTOe0ciELeaLL1yR5vQ7V
+# gtP97pwHB9KpbE51yMo1V/YBf2xK4OK9uT4XYDP/XE/HZveVU3Fa4n5KWv64NmeF
+# RiMMtY0Tz3cywBAY6GB9alKDRLemjkZrBxTzxXb1hlDcwUTIcVxRMTegCjhuje3X
+# D9gmU3w5YQJ6xKr9cmmvHaus9ja+NSZk2pg7uhp7M62AW36MEBydUv626GIl3GoP
+# z130/o5Tz9bshVZN7928jaTjkY+yOSxRnOlwaQ3KNi1wjjHINSi947SHJMPgyY9+
+# tVSP3PoFVZhtaDuaRr3tpK56KTesy+uDRedGbsoy1cCGMFxPLOJiss254o2I5Jas
+# AUq7vnGpF1tnYN74kpEeHT39IM9zfUGaRnXNxF803RKJ1v2lIH1+/NmeRd+2ci/b
+# fV+AutuqfjbsNkz2K26oElHovwUDo9Fzpk03dJQcNIIP8BDyt0cY7afomXw/TNuv
+# XsLz1dhzPUNOwTM5TI4CvEJoLhDqhFFG4tG9ahhaYQFzymeiXtcodgLiMxhy16cg
+# 8ML6EgrXY28MyTZki1ugpoMhXV8wdJGUlNi5UPkLiWHzNgY1GIRH29wb0f2y1BzF
+# a/ZcUlFdEtsluq9QBXpsxREdcu+N+VLEhReTwDwV2xo3xwgVGD94q0W29R6HXtqP
+# nhZyacaue7e3PmriLq0CAwEAAaOCAd0wggHZMBIGCSsGAQQBgjcVAQQFAgMBAAEw
+# IwYJKwYBBAGCNxUCBBYEFCqnUv5kxJq+gpE8RjUpzxD/LwTuMB0GA1UdDgQWBBSf
+# pxVdAF5iXYP05dJlpxtTNRnpcjBcBgNVHSAEVTBTMFEGDCsGAQQBgjdMg30BATBB
+# MD8GCCsGAQUFBwIBFjNodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL0Rv
+# Y3MvUmVwb3NpdG9yeS5odG0wEwYDVR0lBAwwCgYIKwYBBQUHAwgwGQYJKwYBBAGC
+# NxQCBAweCgBTAHUAYgBDAEEwCwYDVR0PBAQDAgGGMA8GA1UdEwEB/wQFMAMBAf8w
+# HwYDVR0jBBgwFoAU1fZWy4/oolxiaNE9lJBb186aGMQwVgYDVR0fBE8wTTBLoEmg
+# R4ZFaHR0cDovL2NybC5taWNyb3NvZnQuY29tL3BraS9jcmwvcHJvZHVjdHMvTWlj
+# Um9vQ2VyQXV0XzIwMTAtMDYtMjMuY3JsMFoGCCsGAQUFBwEBBE4wTDBKBggrBgEF
+# BQcwAoY+aHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraS9jZXJ0cy9NaWNSb29D
+# ZXJBdXRfMjAxMC0wNi0yMy5jcnQwDQYJKoZIhvcNAQELBQADggIBAJ1VffwqreEs
+# H2cBMSRb4Z5yS/ypb+pcFLY+TkdkeLEGk5c9MTO1OdfCcTY/2mRsfNB1OW27DzHk
+# wo/7bNGhlBgi7ulmZzpTTd2YurYeeNg2LpypglYAA7AFvonoaeC6Ce5732pvvinL
+# btg/SHUB2RjebYIM9W0jVOR4U3UkV7ndn/OOPcbzaN9l9qRWqveVtihVJ9AkvUCg
+# vxm2EhIRXT0n4ECWOKz3+SmJw7wXsFSFQrP8DJ6LGYnn8AtqgcKBGUIZUnWKNsId
+# w2FzLixre24/LAl4FOmRsqlb30mjdAy87JGA0j3mSj5mO0+7hvoyGtmW9I/2kQH2
+# zsZ0/fZMcm8Qq3UwxTSwethQ/gpY3UA8x1RtnWN0SCyxTkctwRQEcb9k+SS+c23K
+# jgm9swFXSVRk2XPXfx5bRAGOWhmRaw2fpCjcZxkoJLo4S5pu+yFUa2pFEUep8beu
+# yOiJXk+d0tBMdrVXVAmxaQFEfnyhYWxz/gq77EFmPWn9y8FBSX5+k77L+DvktxW/
+# tM4+pTFRhLy/AsGConsXHRWJjXD+57XQKBqJC4822rpM+Zv/Cuk0+CQ1ZyvgDbjm
+# jJnW4SLq8CdCPSWU5nR0W2rRnj7tfqAxM328y+l7vzhwRNGQ8cirOoo6CGJ/2XBj
+# U02N7oJtpQUQwXEGahC0HVUzWLOhcGbyoYIDTTCCAjUCAQEwgfmhgdGkgc4wgcsx
+# CzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRt
+# b25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJTAjBgNVBAsTHE1p
+# Y3Jvc29mdCBBbWVyaWNhIE9wZXJhdGlvbnMxJzAlBgNVBAsTHm5TaGllbGQgVFNT
+# IEVTTjpFMDAyLTA1RTAtRDk0NzElMCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3Rh
+# bXAgU2VydmljZaIjCgEBMAcGBSsOAwIaAxUAt7/YkjttsaG+2cTeXVwhKvvSL/+g
+# gYMwgYCkfjB8MQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
+# A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYw
+# JAYDVQQDEx1NaWNyb3NvZnQgVGltZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0B
+# AQsFAAIFAO5g/48wIhgPMjAyNjA5MjUxNDExMjdaGA8yMDI2MDkyNjE0MTEyN1ow
+# dDA6BgorBgEEAYRZCgQBMSwwKjAKAgUA7mD/jwIBADAHAgEAAgIRdzAHAgEAAgIS
+# rjAKAgUA7mJRDwIBADA2BgorBgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAow
+# CAIBAAIDB6EgoQowCAIBAAIDAYagMA0GCSqGSIb3DQEBCwUAA4IBAQBv70kqsoar
+# dcuQwgFnICqoWmQvqVzYCTxFJdgbqmFY1mrmDPZR+zSX/9Gv2e7W0aojw8dSBWWO
+# prcbiki3Cpq2Dt+f1k7t9jDBoqO+lhGl6fq0P9+/d5doQ2wu4wXl0P5T3Ih2iTob
+# xd4oZ64aXJfKVH7/ztJ8eqwVt3+6KI5ho8HnDZsEZVtoLwQRxf0JjJRXaZiRVQ0p
+# lqGPIh/Cvk5yUqVs7JwrTpr7dUT4NGHiANVcVvkr45Kcvt3aPPI9IZYnj9qb9ezI
+# lim59bjTGHWm0zUKo/RWfB0MJy+sKUeqE10l84vt6GKjzFGG4zrMHahezJZ7ZzA5
+# ozIRZXyVTqlFMYIEDTCCBAkCAQEwgZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgT
+# Cldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29m
+# dCBDb3Jwb3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENB
+# IDIwMTACEzMAAAIpDtVkKrSX8hoAAQAAAikwDQYJYIZIAWUDBAIBBQCgggFKMBoG
+# CSqGSIb3DQEJAzENBgsqhkiG9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgqtLAsFKY
+# nEpvBzRu4CbBfXdUV7TXz0wMijcMQCxv2l4wgfoGCyqGSIb3DQEJEAIvMYHqMIHn
+# MIHkMIG9BCC3yj3xIrbw/5UrxLpsaj5JHjhLYJJihRFTLnpfaDq6kjCBmDCBgKR+
+# MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdS
+# ZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMT
+# HU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwAhMzAAACKQ7VZCq0l/IaAAEA
+# AAIpMCIEIFS3OA3omIPzsOGv17HmPQbmyG+LDg6ykjls5DIYM3iwMA0GCSqGSIb3
+# DQEBCwUABIICAH2VlcZWIQddKPv3Rhy6G8Img+GLCtIBdaZUeCUMbxjMcXcfI3dK
+# x7vW7M6w9c4Vm7V0CTALfroZ8lhg/Xr0wdMc+XTxnuU+p2aI9MmVZtd0rRCNAB1t
+# iO0Z7z6xpRLMMeMR+7bEfk8ewjE8fMtMO17I3i7ecxkp3wB+K/0bTqAuj9zkT+jx
+# M7mMH6eGKYRwjCNw0tZN3PNfJi1t2XVcjVnsugGZcvMzur3r2QM0Vn2QmJfqwZiB
+# OvUIbYc+rQg54WrnbIUxLafFbugwf/y/nSfUr16bAI+c4WGlqFSpxkl2MrKz/j56
+# NiNXs36xhU4T4le72E87sbGSpjVjXlkTrjjsgoi22C0CQF1oGyIKzaz8cxz2CpjC
+# Jsii5rhMW1LuKvmSoPHPnWHlAzw41YCAZtg23gXHz+VBwBM3L2CGda7m8NuZ/Aas
+# d25HHF5tfYuTxZiz8Lv8Rpcg25YMPlCmPMFjxtkfOBkeRLLlZ/9Pn79GbY68y/Bg
+# u/vvgGuHL7iGzdlZAQFEXntY8XtDl6NqJhYaqdKiFhfKOlMOb3Q2hm+r9c6BxN4U
+# k1TJG24awFvuIZgUOY7XuUcw5sI+omrnAqE6vOoUeeSsNm+5BINU1NlncT7pblZo
+# SmvVU8dURhm2Grr79s6TS4VzBe8L7ns62GOBSldZAGto9lekpXxHDDcW
 # SIG # End signature block
