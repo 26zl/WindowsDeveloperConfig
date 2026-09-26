@@ -4,11 +4,12 @@
 .DESCRIPTION
   Copies src\windows-dev-config\dev-config.ps1 and steps\ to a folder that survives a reboot,
   removes the RemoteDesktop tweak from steps\registry-system.ps1, verifies that nothing in the
-  staged copy still references fDenyTSConnections, guards the Lxss registry key in steps\wsl.ps1
-  so existing WSL distro registrations are never wiped, optionally trims the staged copy
+  staged copy still references fDenyTSConnections, optionally trims the staged copy
   (-SkipSteps, -SkipPackages, -SkipTweaks, -KeepNotifications) and launches dev-config.ps1 -AllowUnsigned on
-  PowerShell 7. The flow elevates itself through UAC and resumes from the staged folder if it
-  has to reboot. Upstream files in the checkout are never modified.
+  PowerShell 7 with upstream's default action (Full). The flow elevates itself through UAC and
+  resumes from the staged folder if it has to reboot. Upstream files in the checkout are never
+  modified. Entries are removed as whole blocks, so both the one-line layout and the multi-line
+  @{ ... } layout upstream switched to in #108 work.
 .PARAMETER InstallRoot
   Where the staged copy lives. Defaults to %LOCALAPPDATA%\CalmOS-nordp.
 .PARAMETER SkipSteps
@@ -19,10 +20,9 @@
   Each ID has to match exactly one entry.
 .PARAMETER SkipTweaks
   Names of single registry tweaks to remove from the staged steps\registry-*.ps1 and
-  steps\edge.ps1, e.g. WidgetServiceOff. Each name has to match exactly one entry. Registry
-  tweaks are not best-effort upstream, so one that cannot be written stops the whole run;
-  WidgetServiceOff is the known case (UCPD.sys denies PowerShell the write to
-  HKLM\SOFTWARE\Policies\Microsoft\Dsh, even elevated).
+  steps\edge.ps1, e.g. Sudo. Each name has to match exactly one entry. A tweak that cannot be
+  written stops the whole run unless upstream marks it BestEffort. WidgetServiceOff, which
+  UCPD.sys blocks even elevated, has been BestEffort since #108, so it no longer needs skipping.
 .PARAMETER KeepNotifications
   Same as -SkipTweaks DoNotDisturb: toasts (Defender, Controlled Folder Access, BitLocker,
   update restarts) stay visible.
@@ -44,29 +44,31 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Rewrites the single line matching $Pattern in a staged file. $Replacement receives the line and
-# returns its replacement; without it the line is removed. Anything other than exactly one match
-# means upstream changed the file, so the run stops instead of guessing.
-function Edit-StagedLine {
+# Removes the entry whose line matches $Pattern from a staged file. Upstream writes an entry either
+# on one line (@{ Name = 'X'; ... }) or, since #108, as a block that opens with a bare "@{" and
+# closes with a bare "}"; a block is removed whole. Anything other than exactly one match means
+# upstream changed the file, so the run stops instead of guessing.
+function Remove-StagedEntry {
     param(
         [Parameter(Mandatory)] [string] $Path,
         [Parameter(Mandatory)] [string] $Pattern,
-        [Parameter(Mandatory)] [string] $What,
-        [scriptblock] $Replacement
+        [Parameter(Mandatory)] [string] $What
     )
     $lines = [System.IO.File]::ReadAllLines($Path)
-    $hits  = @($lines | Where-Object { $_ -match $Pattern })
+    $hits  = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match $Pattern })
     if ($hits.Count -ne 1) {
         throw "Expected exactly one $What in $Path, found $($hits.Count). Upstream changed the file; review it before running."
     }
-    $kept = foreach ($line in $lines) {
-        if ($line -notmatch $Pattern) {
-            $line
-        } elseif ($Replacement) {
-            & $Replacement $line
+    $first = $last = $hits[0]
+    if ($lines[$first] -notmatch '^\s*@\{.*\}\s*$') {
+        while ($first -gt 0 -and $lines[$first] -notmatch '^\s*@\{\s*$') { $first-- }
+        while ($last -lt $lines.Count - 1 -and $lines[$last] -notmatch '^\s*\}\s*$') { $last++ }
+        if ($lines[$first] -notmatch '^\s*@\{\s*$' -or $lines[$last] -notmatch '^\s*\}\s*$') {
+            throw "Could not find where the $What in $Path starts and ends. Upstream changed the file; review it before running."
         }
     }
-    [System.IO.File]::WriteAllLines($Path, @($kept), [System.Text.UTF8Encoding]::new($false))
+    $kept = @($lines | Select-Object -First $first) + @($lines | Select-Object -Skip ($last + 1))
+    [System.IO.File]::WriteAllLines($Path, [string[]]$kept, [System.Text.UTF8Encoding]::new($false))
 }
 
 $repo   = Split-Path -Parent $PSScriptRoot
@@ -93,7 +95,7 @@ Copy-Item -LiteralPath (Join-Path $source 'steps') -Destination $stagedSteps -Re
 
 $changes = [System.Collections.Generic.List[string]]::new()
 
-Edit-StagedLine -Path (Join-Path $stagedSteps 'registry-system.ps1') -Pattern "Name\s*=\s*'RemoteDesktop'" -What 'RemoteDesktop entry'
+Remove-StagedEntry -Path (Join-Path $stagedSteps 'registry-system.ps1') -Pattern "Name\s*=\s*'RemoteDesktop'" -What 'RemoteDesktop entry'
 $changes.Add('RemoteDesktop removed from steps\registry-system.ps1')
 
 $leftovers = @(Get-ChildItem -LiteralPath $stagedSteps -Filter '*.ps1' -File |
@@ -101,24 +103,6 @@ $leftovers = @(Get-ChildItem -LiteralPath $stagedSteps -Filter '*.ps1' -File |
 if ($leftovers.Count -gt 0) {
     throw "fDenyTSConnections is still referenced in: $(($leftovers | ForEach-Object { $_.Path }) -join ', ')"
 }
-
-# Upstream calls New-Item -Force on HKCU:\...\Lxss before installing Ubuntu. In the registry
-# provider, -Force on an existing key deletes its values and subkeys, and the subkeys of Lxss are
-# the WSL distro registrations. The install step runs whenever no Ubuntu* distro is listed, so a
-# machine with only Debian or docker-desktop would lose those registrations.
-$wslFile     = Join-Path $stagedSteps 'wsl.ps1'
-$lxssPattern = '^\s*New-Item\s+-Path\s+\$lxssPath\s+-Force\s*\|\s*Out-Null\s*$'
-Edit-StagedLine -Path $wslFile -Pattern $lxssPattern -What 'unguarded New-Item on $lxssPath' -Replacement {
-    param($line)
-    $indent = $line -replace '^(\s*).*$', '$1'
-    "${indent}if (-not (Test-Path -LiteralPath `$lxssPath)) { New-Item -Path `$lxssPath -Force | Out-Null }"
-}
-$unguarded = @(Select-String -LiteralPath $wslFile -Pattern 'New-Item\s+-Path\s+\$lxssPath' |
-    Where-Object { $_.Line -notmatch 'Test-Path' })
-if ($unguarded.Count -gt 0) {
-    throw "steps\wsl.ps1 still creates the Lxss key without a Test-Path guard (line $($unguarded[0].LineNumber))."
-}
-$changes.Add('Lxss key guarded in steps\wsl.ps1 (existing WSL distros stay registered)')
 
 $tweakNames = @($SkipTweaks)
 if ($KeepNotifications -and $tweakNames -notcontains 'DoNotDisturb') {
@@ -131,7 +115,7 @@ foreach ($tweak in $tweakNames) {
     if ($owners.Count -ne 1) {
         throw "Expected the tweak '$tweak' in exactly one of the staged registry step files, found it in $($owners.Count)."
     }
-    Edit-StagedLine -Path $owners[0].FullName -Pattern $pattern -What "$tweak entry"
+    Remove-StagedEntry -Path $owners[0].FullName -Pattern $pattern -What "$tweak entry"
     $changes.Add("$tweak removed from steps\$($owners[0].Name)")
 }
 
@@ -140,7 +124,7 @@ if ($SkipPackages.Count -gt 0) {
         Write-Warning '-SkipPackages has no effect because the packages phase is skipped.'
     } else {
         foreach ($id in $SkipPackages) {
-            Edit-StagedLine -Path (Join-Path $stagedSteps 'packages.ps1') -Pattern "Id\s*=\s*'$([regex]::Escape($id))'" -What "package entry for $id"
+            Remove-StagedEntry -Path (Join-Path $stagedSteps 'packages.ps1') -Pattern "Id\s*=\s*'$([regex]::Escape($id))'" -What "package entry for $id"
             $changes.Add("$id removed from steps\packages.ps1")
         }
     }
