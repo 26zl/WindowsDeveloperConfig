@@ -43,7 +43,7 @@ irm https://aka.ms/devconfig/full/setup.ps1 | iex
 
 ### Uninstall for both full and standard experiences
 ```powershell
-irm https://aka.ms/devconfig/standard/setup.ps1 | iex
+irm https://aka.ms/devconfig/standard/uninstall.ps1 | iex
 ```
 
 The AKA.ms links are direct references to the setup-full.ps1 and setup-standard.ps1 files.  Below is the same basic command as the full/setup.ps1
