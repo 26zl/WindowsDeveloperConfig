@@ -1,26 +1,135 @@
+<#
+.SYNOPSIS
+  Windows Dev Config: developer tools, Windows settings, fonts, Terminal, and WSL + Ubuntu.
+
+.DESCRIPTION
+  Workload definition read by dev-config.ps1. It only lists phases; the phase files under
+  steps\ do the work. This is the default workload behind setup-full.ps1,
+  setup-standard.ps1 (Partial), and uninstall.ps1.
+#>
+
 [CmdletBinding()]
-param()
+param(
+    [string] $Action = 'Full'
+)
 
-& {
-    $ErrorActionPreference = 'Stop'
-    Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $payloadRef = '972c0702f50f469c2561496bebf88200ec278c63'
-    $bootstrap = (Invoke-RestMethod -Uri "https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/$payloadRef/windows-dev-config/bootstrap.ps1" -UseBasicParsing -TimeoutSec 60).TrimStart([char]0xFEFF)
-    $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($bootstrap)) -SourcePathOrExtension '.ps1'
-    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
-        throw 'The setup bootstrap failed Microsoft signature verification. Setup was not started.'
+# WSL stays last so its required reboot happens after other phases.
+$phases = @(
+    @{
+        File     = 'prerequisites.ps1'
+        Function = 'Invoke-PrerequisitesPhase'
+        Title    = 'Getting ready'
     }
-    & ([scriptblock]::Create($bootstrap)) -Ref $payloadRef -Action Uninstall
+    @{
+        File       = 'packages.ps1'
+        Function   = 'Invoke-PackagesPhase'
+        Title      = 'Packages'
+        Uninstall  = $true
+        # Install order; names refer to the package catalog in steps\packages.ps1.
+        Parameters = @{
+            Packages = @(
+                'Terminal'
+                'IntelligentTerminal'
+                'PowerShell'
+                'Git'
+                'GitHubCLI'
+                'AzureCLI'
+                'GitHubCopilot'
+                'VSCode'
+                'DotnetSdk'
+                'Python'
+                'VCRedist'
+                'UV'
+                'NodeJS'
+                'nvmForNode'
+                'Coreutils'
+                'OhMyPosh'
+                'winappCli'
+                'PowerToys'
+            )
+        }
+    }
+    @{
+        File      = 'registry-system.ps1'
+        Function  = 'Invoke-RegistrySystemPhase'
+        Title     = 'System settings'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-explorer.ps1'
+        Function  = 'Invoke-RegistryExplorerPhase'
+        Title     = 'File Explorer tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'registry-taskbar-search.ps1'
+        Function  = 'Invoke-RegistryTaskbarSearchPhase'
+        Title     = 'Taskbar, search & start tweaks'
+        Uninstall = $true
+    }
+    @{
+        File      = 'edge.ps1'
+        Function  = 'Invoke-EdgePhase'
+        Title     = 'Microsoft Edge tweaks'
+        Uninstall = $true
+    }
+    @{
+        File     = 'fonts.ps1'
+        Function = 'Invoke-FontsPhase'
+        Title    = 'Fonts'
+    }
+    @{
+        File      = 'terminal.ps1'
+        Function  = 'Invoke-TerminalPhase'
+        Title     = 'Windows Terminal'
+        Uninstall = $true
+    }
+    @{
+        File      = 'powershell-profile.ps1'
+        Function  = 'Invoke-PowerShellProfilePhase'
+        Title     = 'PowerShell profile'
+        Uninstall = $true
+    }
+    @{
+        File      = 'copilot.ps1'
+        Function  = 'Invoke-CopilotPhase'
+        Title     = 'GitHub Copilot'
+        Uninstall = $true
+    }
+    @{
+        File      = 'wsl.ps1'
+        Function  = 'Invoke-WslPhase'
+        Title     = 'WSL + Ubuntu'
+        Uninstall = $true
+    }
+)
+if ($Action -eq 'Partial') {
+    $phases = @($phases | Where-Object { $_.File -ne 'edge.ps1' })
+    ($phases | Where-Object { $_.File -eq 'registry-taskbar-search.ps1' }).Title = 'Taskbar & Start tweaks'
+} elseif ($Action -eq 'Uninstall') {
+    $phases = @($phases | Where-Object { $_['Uninstall'] })
+    # Remove tools after the cleanup steps that need them.
+    $phases = @($phases | Where-Object { $_.File -ne 'packages.ps1' }) +
+        @($phases | Where-Object { $_.File -eq 'packages.ps1' })
+}
+
+@{
+    Name             = 'Calm OS'
+    Actions          = @('Full', 'Partial', 'Uninstall')
+    SetupNote        = 'one reboot expected along the way'
+    UninstallWarning = 'Ubuntu and its files will be deleted. Targeted tools are removed even if they predate setup.'
+    Notes            = @('A few Explorer and taskbar changes appear once you sign out and back in.')
+    Phases           = $phases
 }
 
 # SIG # Begin signature block
 # MIInNwYJKoZIhvcNAQcCoIInKDCCJyQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB3RVM9fTenIkVj
-# Ly/UkxaadF3oJlr/KYCP3UtoAQn086CCDMkwggYEMIID7KADAgECAhMzAAACHPrN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBte8DpWIQvHH0K
+# HLBXAMCL0lFCDuGaE58+Hg3K2R2rJ6CCDMkwggYEMIID7KADAgECAhMzAAACHPrN
 # xZvoL37EAAAAAAIcMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQxWhcNMjcwNDE1MTg1
@@ -92,19 +201,19 @@ param()
 # MFcxCzAJBgNVBAYTAlVTMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # KDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIc
 # +s3Fm+gvfsQAAAAAAhwwDQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwG
-# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEILx9wt1n55/PaRTivGpTqYBQlZ/u
-# b7wVEnDdMgtXOVM8MEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
+# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIEQZnsVV5LGjBAZ6KVMJnKff84CL
+# fV/QBfZyBa9UNlGBMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
 # AGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAE
-# ggEAvMCHdX/KcYcas7R3AchGu1EzfM547Yje3JnXm+8rnscVjv6H5aJsN/Fd01Ef
-# y5CAU6J2HdbWkS0STq27oP7VDbdplmhDvS3p9RMKLRq+6XhNKGX/2w4DPcVW6FbR
-# WYLsgtIMFLM3p+/aOvpEwiBSGlgtt/oVXqhWmqBf/1KUFZyL+iet5fQbHBBNjPYX
-# mIi7WjXcfgbY2U3hAPVvuzGoxMXoI12Ukasu5wPywrnRsVOGNqKanpKZ+jXrj+bl
-# zbLT7jRfXQWE8w9OAbnOhGUDFpooGhnjlIUDeYXpdwLtyDqpZ8XHl7RZfxTrCoLW
-# yGkR8b4WLv5hhW2uyqTOEL3Yw6GCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
+# ggEAzdp42wFQAC8jgP/zYB/mutz0rFUOzU07nEA79NSRUFhsvIckcM+7mx5gk38x
+# kdeAAxNHaDnhbG5xuQD6L7320vpoJvV5RBnFFUSDMZbP1KyP3gKKEl4ejfEq3VN7
+# pBxNGAfhnbCraqM3l+xGX6ubqlhpT9R1mI+0HfJ9Udz9/5J0F5Sdk+BdfWYV/HWP
+# V9dmCJ+uaxwQCYx4u+cW7uM/ky1V4rIX9G6pjxDBvfsD/Pb9peyrNHiO2/obuHLt
+# TuPFm3ZAwB0DbSM6gUU9/BG7gXHGStNBVEZ4cmDF94XbuW+2WFT8A52Khxcj1VIF
+# XuT0+6nXm/bpMl78xTGRU1zLjKGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
 # CSqGSIb3DQEHAqCCF20wghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
 # 9w0BCRABBKCCAUEEggE9MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQC
-# AQUABCBMDYcrHsDj5vnoDX4rOZhmceamrySYPpMZifYz7XrQXwIGaqpoyFBLGBMy
-# MDI2MTAwMjAzNTU1MS4xNjlaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
+# AQUABCDJijITVAH6cTXbneQSCryhUGlCf46CW7gjwBhPF4R2GAIGaqpov2UwGBMy
+# MDI2MTAwMjAwMTQwOS43OTdaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
 # MBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMV
 # TWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmlj
 # YSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046OTYwMC0wNUUw
@@ -209,22 +318,22 @@ param()
 # MBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3Nv
 # ZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAiY1tD5nQ5P2HwABAAACJjANBglg
 # hkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqG
-# SIb3DQEJBDEiBCAZIVb+Bc3F20W8A7DYJqAK7MwddywkDAxiQQOXGi9VgDCB+gYL
+# SIb3DQEJBDEiBCCg7+pG78m/nBdEWI9Yh1rjYml9nkniElD2cfUqD8HbdTCB+gYL
 # KoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIMwyXGFnTNsZRBrs6GN/BbV0okaNP3VB
 # YqLFjUsFnbgqMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
 # bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
 # b3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAC
 # EzMAAAImNbQ+Z0OT9h8AAQAAAiYwIgQgZPa2+BiHJ32O4XNbA9Ln4Y8xX7UBc3GQ
-# mZ55BpKLqHIwDQYJKoZIhvcNAQELBQAEggIAQL1N5S8vX6N5usbk1ojJp6EkCdaF
-# +vdY5B9ogVX+ii14HQSZVk2dXHltkHvbT8tihghmKa4YLiyOOFl9InzARlzVIMM/
-# 7NAzpz3b/0LwQBSTRNMi5hQb+n9EI376Gl5jnnteOQwMNwvMWWgM7/Ib+L/ocnuR
-# rTpoejh/ccZ4J2V87lpsiz4Hd/O2uRAOEhIp1M4vXFu3LUcj3NRmTaPu8wnZCblL
-# 1GjLtm+t6TIccKtSPi7teALBu3Rr2tIeOSWT1bNzyv9YT3NuFJeJaxWa1rUca0ra
-# sG2ymTwkHCkRnrx3LdNpKsPNcDUh9aRTKtgDjrlu8GKvMIIsCdWbh6lM83Li4rWk
-# SDetGrV6dVqB6YPY1qDDFntxc94RjYDGtIF9A0f/QoG4jn+c98onu8Y+zhCtCe4i
-# 9DxVjJMGBWurOeCGdxLwe7EuWXKcIbdiZoXzKm3m2tmsTIE06yqnpJ4J/dBXLUsx
-# 1qa+rIIwwaaMH4zG71xwvW5eUA8egkQezQ4tSzycUqS5CGzJtuyoDB2w9+tCGDDj
-# DrelLZTxLsWGk1PQOvEGTkkV3BppHb0lK/SapKdho+Ja4ViUXRHp1Q+VATswemSu
-# WxEZak3J6jMiofCEd2GFJMWEXZ4AHYfI7OfmYL8xe++63DEVPDtcjif0EYMsX75M
-# /JeP4ufaSL7HBng=
+# mZ55BpKLqHIwDQYJKoZIhvcNAQELBQAEggIArlZcCJ5WTIkHZhgT67U1L3kt2DCb
+# IQ1RxFDx4LZPAXwP/PGm2bVg61UzXRjQy4h0M4776mnc07UVN+gP3RB6EogLT4YS
+# YOF5P8QzFPSCGFnRfCkur1GaKnrPoQs6v9w5WfGHC6Jl0YRF3KbX6o4FXXpUUkgB
+# 4XHbxWsJNYsmtjZBVzfIiAqPzQixpm9IKJ9X9K40cYTEVvr8aZNgObUo6iSTYM4Y
+# YTvm0c29wkT/306j5Ez4Ovcgt6Y9pOqRPolax0F9ZE+mZs1XMMSU7eyH6tsrGq/y
+# S0il4vHRDluVZHHGQ9NfwePNrA3TDHhOtAtfvCg/GV10JEtU16usNRlkYSPZm+2i
+# 7ASWP09V/f/KozWrtJb0J/kLqRU71CZdbnSwikeMSxJ8mv/IlS3Zkug/q9x40yWC
+# ad3H7i1uioHelYLHsQ24Y6EPMepWofJVgn1aXQy0YyN7VlSTB3sLt7At+uoaVU/o
+# 7GAz/CUKfQO5tri4JMcJhtoio6/VKl6BF6BFIo6RNRCXwkg05SVhdxnGPBA5w5bC
+# dO+kUaFbcnpZT/bOEkuyrJfzocCZAtQG+y7ux55zMOxvc4Li6tYBW8vDN3hjZcg/
+# swdZY5JtW0BoQ80BFimqQduu1t7OnTPoq5dXgM6MBboP9Zhby5SH2H3k9R9IyujY
+# buhbBR9LS0C8N24=
 # SIG # End signature block

@@ -1,26 +1,166 @@
-[CmdletBinding()]
-param()
+<#
+.SYNOPSIS
+  Loads a workload definition from workloads\ and runs its phases.
+#>
 
-& {
-    $ErrorActionPreference = 'Stop'
-    Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $payloadRef = '972c0702f50f469c2561496bebf88200ec278c63'
-    $bootstrap = (Invoke-RestMethod -Uri "https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/$payloadRef/windows-dev-config/bootstrap.ps1" -UseBasicParsing -TimeoutSec 60).TrimStart([char]0xFEFF)
-    $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($bootstrap)) -SourcePathOrExtension '.ps1'
-    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
-        throw 'The setup bootstrap failed Microsoft signature verification. Setup was not started.'
+# Unknown keys fail the run so a misspelled setting is not silently ignored.
+$Script:DevConfigWorkloadKeys = @('Name', 'Actions', 'Phases', 'MinimumOSVersion', 'SetupNote', 'UninstallWarning', 'Notes')
+$Script:DevConfigPhaseKeys    = @('File', 'Function', 'Title', 'Parameters', 'Steps', 'Uninstall')
+
+function Assert-DevConfigWorkloadDefinition {
+    param(
+        [Parameter(Mandatory)] [AllowNull()] $Definition,
+        [Parameter(Mandatory)] [string] $Workload
+    )
+    if ($Definition -isnot [hashtable]) {
+        throw "workloads\$Workload.ps1 must return a hashtable."
     }
-    & ([scriptblock]::Create($bootstrap)) -Ref $payloadRef -Action Uninstall
+
+    $problems = @()
+    foreach ($key in $Definition.Keys) {
+        if ($Script:DevConfigWorkloadKeys -notcontains $key) {
+            $problems += "unknown setting '$key'"
+        }
+    }
+    if (-not ($Definition['Name'] -is [string] -and $Definition['Name'])) {
+        $problems += 'Name must be a non-empty string'
+    }
+    $actions = @($Definition['Actions'] | Where-Object { $null -ne $_ })
+    if ($actions.Count -eq 0 -or @($actions | Where-Object { $_ -notin @('Full', 'Partial', 'Uninstall') }).Count -gt 0) {
+        $problems += 'Actions must list Full, Partial, and/or Uninstall'
+    }
+    if ($Definition['MinimumOSVersion'] -and -not ($Definition['MinimumOSVersion'] -as [version])) {
+        $problems += 'MinimumOSVersion must be a version such as 10.0.17763'
+    }
+
+    $phases = @($Definition['Phases'] | Where-Object { $null -ne $_ })
+    if ($phases.Count -eq 0) {
+        $problems += 'Phases must list at least one phase'
+    }
+    foreach ($phase in $phases) {
+        if ($phase -isnot [hashtable]) {
+            $problems += 'every phase must be a hashtable'
+            continue
+        }
+        $label = if ($phase['Title']) { "phase '$($phase['Title'])'" } else { 'a phase' }
+        foreach ($key in $phase.Keys) {
+            if ($Script:DevConfigPhaseKeys -notcontains $key) {
+                $problems += "$label has unknown setting '$key'"
+            }
+        }
+        # Files starting with _ are shared helpers, which are always loaded and are never phases.
+        if (-not ($phase['File'] -is [string] -and $phase['File'] -match '^[a-z0-9]+(-[a-z0-9]+)*\.ps1$')) {
+            $problems += "$label needs File set to a phase file under steps\"
+        }
+        if (-not ($phase['Function'] -is [string] -and $phase['Function'] -match '^Invoke-\w+Phase$')) {
+            $problems += "$label needs Function set to the phase's Invoke-<Name>Phase function"
+        }
+        if (-not ($phase['Title'] -is [string] -and $phase['Title'])) {
+            $problems += "$label needs a Title"
+        }
+        if ($phase.ContainsKey('Parameters') -and $phase['Parameters'] -isnot [hashtable]) {
+            $problems += "$label Parameters must be a hashtable"
+        }
+        if ($phase.ContainsKey('Steps') -and
+            (@($phase['Steps']).Count -eq 0 -or @($phase['Steps'] | Where-Object { $_ -isnot [string] -or -not $_ }).Count -gt 0)) {
+            $problems += "$label Steps must list step names"
+        }
+    }
+
+    if ($problems.Count -gt 0) {
+        throw "workloads\$Workload.ps1 is not a valid workload: $($problems -join '; ')."
+    }
+}
+
+function Get-DevConfigWorkload {
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [Parameter(Mandatory)] [string] $Workload,
+        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+    )
+    $path = Join-Path $Directory "$Workload.ps1"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $available = @(Get-ChildItem -LiteralPath $Directory -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.BaseName }) -join ', '
+        throw "There is no '$Workload' workload. Available workloads: $available."
+    }
+
+    # Definitions only describe phases; they are invoked for the requested action and must not change the machine.
+    $definition = & $path -Action $Action
+    Assert-DevConfigWorkloadDefinition -Definition $definition -Workload $Workload
+
+    if (@($definition['Actions']) -notcontains $Action) {
+        throw "The $($definition['Name']) workload supports -Action $(@($definition['Actions']) -join ', ') only."
+    }
+    if ($definition['MinimumOSVersion']) {
+        $current = [Environment]::OSVersion.Version
+        if ($current -lt [version]$definition['MinimumOSVersion']) {
+            throw "The $($definition['Name']) workload needs Windows $($definition['MinimumOSVersion']) or later. This machine runs $current."
+        }
+    }
+    return $definition
+}
+
+# Parameters come from the workload; phases that can reboot also receive the orchestrator path so resume can relaunch it.
+function Resolve-DevConfigWorkloadPhase {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Phase,
+        [Parameter(Mandatory)] [string] $OrchestratorPath
+    )
+    $scriptPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OrchestratorPath)
+    $phasePath = Join-Path (Split-Path -Parent $scriptPath) "steps\$($Phase['File'])"
+    $command = Get-Command -Name $Phase['Function'] -CommandType Function -ErrorAction SilentlyContinue
+    if (-not $command -or $command.ScriptBlock.File -ne $phasePath) {
+        throw "$($Phase['File']) does not define $($Phase['Function'])."
+    }
+
+    $parameters = @{}
+    if ($Phase['Parameters']) {
+        foreach ($name in $Phase['Parameters'].Keys) {
+            if (-not $command.Parameters.ContainsKey($name)) {
+                throw "$($Phase['Function']) has no -$name parameter, so the workload cannot pass it."
+            }
+            $parameters[$name] = $Phase['Parameters'][$name]
+        }
+    }
+    if ($command.Parameters.ContainsKey('OrchestratorPath')) {
+        $parameters['OrchestratorPath'] = $OrchestratorPath
+    }
+
+    # A missing mandatory value would otherwise stop the run at a parameter prompt.
+    foreach ($parameter in $command.Parameters.Values) {
+        $mandatory = @($parameter.Attributes | Where-Object { $_ -is [Parameter] -and $_.Mandatory }).Count -gt 0
+        if ($mandatory -and -not $parameters.ContainsKey($parameter.Name)) {
+            throw "$($Phase['Function']) requires -$($parameter.Name), so the workload must set it in Parameters."
+        }
+    }
+    return @{ Command = $command; Parameters = $parameters }
+}
+
+function Invoke-DevConfigWorkloadPhase {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Phase,
+        [Parameter(Mandatory)] [string] $OrchestratorPath
+    )
+    $resolved = Resolve-DevConfigWorkloadPhase -Phase $Phase -OrchestratorPath $OrchestratorPath
+    $parameters = $resolved.Parameters
+
+    $Script:DevConfigPhaseSteps = $Phase['Steps']
+    try {
+        & $resolved.Command @parameters
+    } finally {
+        $Script:DevConfigPhaseSteps = $null
+    }
 }
 
 # SIG # Begin signature block
 # MIInNwYJKoZIhvcNAQcCoIInKDCCJyQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB3RVM9fTenIkVj
-# Ly/UkxaadF3oJlr/KYCP3UtoAQn086CCDMkwggYEMIID7KADAgECAhMzAAACHPrN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDvkeZSxVpNOc9n
+# YlX2QEv+paA3CYtE9rffj4nyMnZr1qCCDMkwggYEMIID7KADAgECAhMzAAACHPrN
 # xZvoL37EAAAAAAIcMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQxWhcNMjcwNDE1MTg1
@@ -92,19 +232,19 @@ param()
 # MFcxCzAJBgNVBAYTAlVTMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # KDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIc
 # +s3Fm+gvfsQAAAAAAhwwDQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwG
-# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEILx9wt1n55/PaRTivGpTqYBQlZ/u
-# b7wVEnDdMgtXOVM8MEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
+# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIK5wzdsJAJZmePuEJjzSpylO6B09
+# XinLpbD9GDgzZCyzMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
 # AGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAE
-# ggEAvMCHdX/KcYcas7R3AchGu1EzfM547Yje3JnXm+8rnscVjv6H5aJsN/Fd01Ef
-# y5CAU6J2HdbWkS0STq27oP7VDbdplmhDvS3p9RMKLRq+6XhNKGX/2w4DPcVW6FbR
-# WYLsgtIMFLM3p+/aOvpEwiBSGlgtt/oVXqhWmqBf/1KUFZyL+iet5fQbHBBNjPYX
-# mIi7WjXcfgbY2U3hAPVvuzGoxMXoI12Ukasu5wPywrnRsVOGNqKanpKZ+jXrj+bl
-# zbLT7jRfXQWE8w9OAbnOhGUDFpooGhnjlIUDeYXpdwLtyDqpZ8XHl7RZfxTrCoLW
-# yGkR8b4WLv5hhW2uyqTOEL3Yw6GCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
+# ggEAPPoGjoCoS39UsrebIp/DKAcHdr2pv159GSuOg/syHMkfA3xAMeHq16izX7mx
+# 3HoM285kaVqf8HUNblxOgboXUDBG3fclRmqJFCuMCjgCqe8Y4mNuo3+lT/C4nXjm
+# 8GKqZffpUWknhTYJ5F9d5I5/Kf/ngduC/7IU3fjtEIJJ5Z7/NFPEQ80eWYgchj1L
+# McUZFIUTTv63G01fHqtV3nNtDaH6Xxf7BGvh66iO83cIf01NS4tGWTRRmGXiovBv
+# WaZtfQjkqkdhSfVPd4mvW56+WkjxUeonn5pBnXVsATJB6W7ncwgQoauUkyOwirab
+# 5NDhCRyUo/uLaGp9Lcou9UsVBaGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
 # CSqGSIb3DQEHAqCCF20wghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
 # 9w0BCRABBKCCAUEEggE9MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQC
-# AQUABCBMDYcrHsDj5vnoDX4rOZhmceamrySYPpMZifYz7XrQXwIGaqpoyFBLGBMy
-# MDI2MTAwMjAzNTU1MS4xNjlaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
+# AQUABCA8L/4T6PDskYz+uQJDGtiZpZNwMhDk6kemuvxmJgusBgIGaqpov2VHGBMy
+# MDI2MTAwMjAwMTQxMC4zNjhaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
 # MBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMV
 # TWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmlj
 # YSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046OTYwMC0wNUUw
@@ -209,22 +349,22 @@ param()
 # MBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3Nv
 # ZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAiY1tD5nQ5P2HwABAAACJjANBglg
 # hkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqG
-# SIb3DQEJBDEiBCAZIVb+Bc3F20W8A7DYJqAK7MwddywkDAxiQQOXGi9VgDCB+gYL
+# SIb3DQEJBDEiBCB4nwOPpuBT0Rn+c0cQEMNRivhIQMQCrqKCmdTfUirkiTCB+gYL
 # KoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIMwyXGFnTNsZRBrs6GN/BbV0okaNP3VB
 # YqLFjUsFnbgqMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
 # bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
 # b3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAC
 # EzMAAAImNbQ+Z0OT9h8AAQAAAiYwIgQgZPa2+BiHJ32O4XNbA9Ln4Y8xX7UBc3GQ
-# mZ55BpKLqHIwDQYJKoZIhvcNAQELBQAEggIAQL1N5S8vX6N5usbk1ojJp6EkCdaF
-# +vdY5B9ogVX+ii14HQSZVk2dXHltkHvbT8tihghmKa4YLiyOOFl9InzARlzVIMM/
-# 7NAzpz3b/0LwQBSTRNMi5hQb+n9EI376Gl5jnnteOQwMNwvMWWgM7/Ib+L/ocnuR
-# rTpoejh/ccZ4J2V87lpsiz4Hd/O2uRAOEhIp1M4vXFu3LUcj3NRmTaPu8wnZCblL
-# 1GjLtm+t6TIccKtSPi7teALBu3Rr2tIeOSWT1bNzyv9YT3NuFJeJaxWa1rUca0ra
-# sG2ymTwkHCkRnrx3LdNpKsPNcDUh9aRTKtgDjrlu8GKvMIIsCdWbh6lM83Li4rWk
-# SDetGrV6dVqB6YPY1qDDFntxc94RjYDGtIF9A0f/QoG4jn+c98onu8Y+zhCtCe4i
-# 9DxVjJMGBWurOeCGdxLwe7EuWXKcIbdiZoXzKm3m2tmsTIE06yqnpJ4J/dBXLUsx
-# 1qa+rIIwwaaMH4zG71xwvW5eUA8egkQezQ4tSzycUqS5CGzJtuyoDB2w9+tCGDDj
-# DrelLZTxLsWGk1PQOvEGTkkV3BppHb0lK/SapKdho+Ja4ViUXRHp1Q+VATswemSu
-# WxEZak3J6jMiofCEd2GFJMWEXZ4AHYfI7OfmYL8xe++63DEVPDtcjif0EYMsX75M
-# /JeP4ufaSL7HBng=
+# mZ55BpKLqHIwDQYJKoZIhvcNAQELBQAEggIASrZdDrXhryhWdF0o463eHL+MLlv0
+# l0OMjMIRMWSjPV0o4mdAxi4ooxiyyacMF7oX1QxTdKID7OwsRP1zg7Se8UPVuLes
+# g1Ip1ovOL8PX7iwI3SoeD2Bvj6hkE+VehpnH/ynx5dzmFhu9YKf2o89+/3hwGbVQ
+# WC3h3wgok/sqDSKpWxC0h1OgyTj/TSqentkOfdf336ZdeY6cVEPGI462KE5MwVhr
+# 8Lc57jZVwrj17S7K/2UfbsgTeZfPRgA6jEuKWF9uKVPDVcu7ehHV1TOTNxvG0zgS
+# fy1fnz7MgfzlJ0j+gcKzsEhZ4WWWe3HsHBTUIZBa/bNGBY4IUvCzP3SgkIIq0Wj4
+# k8F4khN0pZoOROHzWyB3sqLWps5/qL+eYCtEEIvDKCNxSJPZyUyNTMTz8vYOAfgL
+# HUtysDzEcmq2R983NNz4/OEYn8c2QENwmA6PP2bMDXO4ZElKcdowa13Us5IOXCTz
+# Ov8WIFO/SYUOUmE1Ju2dM3fz6fVtwf2fK/FZwfZyzHTNFuhZNI2Bd6Zj/evtxTAp
+# T42I6/JBph4Cuf4LClCIrcq4eNI5MTxrKWNSPraUXRAN/OVl7jaRlLoJCtroE+0c
+# eUmBH4iyCTHNEjdDN+kPPaLmacDRmTh7vll3oNaqAxm+Nex3vai2TdQnnsjahDIY
+# EXarGuES8LhVWo4=
 # SIG # End signature block

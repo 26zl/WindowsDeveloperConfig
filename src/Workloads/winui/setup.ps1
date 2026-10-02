@@ -13,5 +13,5 @@ param()
         $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
         throw 'The setup bootstrap failed Microsoft signature verification. Setup was not started.'
     }
-    & ([scriptblock]::Create($bootstrap)) -Ref $payloadRef -Action Uninstall
+    & ([scriptblock]::Create($bootstrap)) -Ref $payloadRef -Workload winui -Action Full
 }

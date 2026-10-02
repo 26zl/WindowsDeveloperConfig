@@ -13,9 +13,13 @@
   Production requests process-scoped RemoteSigned. -AllowUnsigned uses src/ without
   signature checks or execution-policy changes.
 
-  To select a branch or tag:
+  To select a branch, tag, or full 40-character commit SHA:
 
       & ([scriptblock]::Create((irm <url>))) -Ref 'v1.2.3'
+
+  To apply one workload from workloads\ instead of the full Windows Dev Config setup:
+
+      & ([scriptblock]::Create((irm <url>))) -Workload winui
 #>
 
 [CmdletBinding()]
@@ -24,7 +28,8 @@ param(
     [string] $InstallRoot,
     [switch] $AllowUnsigned,
     [switch] $NoLaunch,
-    [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+    [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full',
+    [ValidatePattern('^[a-z0-9]+(-[a-z0-9]+)*$')] [string] $Workload = 'devconfig'
 )
 
 function Invoke-CalmOsBootstrap {
@@ -34,14 +39,91 @@ function Invoke-CalmOsBootstrap {
         [string] $InstallRoot,
         [switch] $AllowUnsigned,
         [switch] $NoLaunch,
-        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full',
+        [ValidatePattern('^[a-z0-9]+(-[a-z0-9]+)*$')] [string] $Workload = 'devconfig'
     )
 
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version Latest
 
+    # Keep this helper identical to steps/_retry.ps1; bootstrap must work on its own.
+    function Invoke-DevConfigWebRequest {
+        param(
+            [Parameter(Mandatory)] [hashtable] $Parameters
+        )
+
+        $waited = 0.0
+        for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+                return Invoke-WebRequest @Parameters -UseBasicParsing -ErrorAction Stop
+            } catch {
+                $response = $null
+                $networkFailure = $false
+                for ($exception = $_.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+                    if ($exception -is [Security.Authentication.AuthenticationException]) { throw }
+                    if ($exception.PSObject.Properties['Response'] -and $null -ne $exception.Response) {
+                        $response = $exception.Response
+                    }
+                    if ($exception -is [Net.WebException]) {
+                        $networkFailure = $exception.Status.ToString() -in @(
+                            'Timeout', 'ConnectFailure', 'ConnectionClosed', 'KeepAliveFailure',
+                            'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ReceiveFailure', 'SendFailure'
+                        )
+                    } elseif ($exception.GetType().FullName -in @(
+                        'System.Net.Http.HttpRequestException', 'System.Net.Http.HttpIOException',
+                        'System.Threading.Tasks.TaskCanceledException', 'System.TimeoutException'
+                    )) {
+                        $networkFailure = $true
+                    }
+                }
+                $status = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
+                if ($attempt -eq 4 -or
+                    ($status -ne 0 -and $status -notin @(408, 429, 500, 502, 503, 504)) -or
+                    ($status -eq 0 -and -not $networkFailure)) {
+                    throw
+                }
+
+                $retryAfter = $null
+                if ($null -ne $response) {
+                    if ($response.Headers -is [Net.WebHeaderCollection]) {
+                        $retryAfter = $response.Headers['Retry-After']
+                    } elseif ($response.Headers.Contains('Retry-After')) {
+                        $retryAfter = @($response.Headers.GetValues('Retry-After'))[0]
+                    }
+                }
+                $serverDelay = 0.0
+                $date = [DateTimeOffset]::MinValue
+                if ($retryAfter -match '^\d+$') {
+                    if (-not [double]::TryParse($retryAfter, [Globalization.NumberStyles]::None,
+                            [Globalization.CultureInfo]::InvariantCulture, [ref]$serverDelay)) { throw }
+                } elseif ($retryAfter -and [DateTimeOffset]::TryParse($retryAfter,
+                        [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$date)) {
+                    $serverDelay = [Math]::Max(0, [Math]::Ceiling(($date - [DateTimeOffset]::UtcNow).TotalSeconds))
+                } elseif ($retryAfter) {
+                    Write-Verbose 'Ignoring an invalid Retry-After header.'
+                }
+
+                $backoff = 5 * [Math]::Pow(2, $attempt - 1)
+                $delay = [Math]::Max($backoff, $serverDelay)
+                $remaining = 120 - $waited
+                if ($delay -gt $remaining) {
+                    Write-Host '  Download retry wait exceeds the remaining two-minute budget.' -ForegroundColor DarkYellow
+                    throw
+                }
+                $jitterMilliseconds = [int][Math]::Floor([Math]::Min($backoff, $remaining - $delay) * 1000)
+                $milliseconds = [int]($delay * 1000) + (Get-Random -Minimum 0 -Maximum ($jitterMilliseconds + 1))
+                Write-Host "  Download attempt $attempt failed; retrying in $([Math]::Round($milliseconds / 1000, 1))s." -ForegroundColor DarkYellow
+                Start-Sleep -Milliseconds $milliseconds
+                $waited += $milliseconds / 1000
+            }
+        }
+    }
+
     $repo = 'microsoft/WindowsDeveloperConfig'
     $microsoftSignerSubject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    $Workload = $Workload.ToLowerInvariant()
+    # The default workload is omitted from command lines so refs that predate workloads still accept them.
+    $workloadSuffix = if ($Workload -ne 'devconfig') { " -Workload $Workload" } else { '' }
 
     # Reject refs that could escape the repository path.
     if ($Ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $Ref.Contains('..')) {
@@ -79,7 +161,8 @@ function Invoke-CalmOsBootstrap {
             [Parameter(Mandatory)] [string] $InstallRoot,
             [switch] $AllowUnsigned,
             [switch] $NoLaunch,
-            [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+            [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full',
+            [ValidatePattern('^[a-z0-9]+(-[a-z0-9]+)*$')] [string] $Workload = 'devconfig'
         )
 
         $launcher = {
@@ -88,7 +171,8 @@ function Invoke-CalmOsBootstrap {
                 [string] $InstallRoot,
                 [switch] $AllowUnsigned,
                 [switch] $NoLaunch,
-                [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+                [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full',
+                [ValidatePattern('^[a-z0-9]+(-[a-z0-9]+)*$')] [string] $Workload = 'devconfig'
             )
 
             $ErrorActionPreference = 'Stop'
@@ -96,7 +180,9 @@ function Invoke-CalmOsBootstrap {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             $flow = if ($AllowUnsigned) { 'src/windows-dev-config' } else { 'windows-dev-config' }
             $baseUri = "https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/$Ref/$flow"
-            $securityCode = (Invoke-RestMethod -Uri "$baseUri/steps/_security.ps1" -UseBasicParsing -TimeoutSec 60).TrimStart([char]0xFEFF)
+            $securityCode = (Invoke-DevConfigWebRequest -Parameters @{
+                Uri = "$baseUri/steps/_security.ps1"; TimeoutSec = 60
+            }).Content.TrimStart([char]0xFEFF)
             if (-not $AllowUnsigned) {
                 $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($securityCode)) -SourcePathOrExtension '.ps1'
                 if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
@@ -109,7 +195,9 @@ function Invoke-CalmOsBootstrap {
             $work = New-DevConfigProtectedDirectory -Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ("CalmOS-bootstrap-" + [guid]::NewGuid().ToString('N')))
             try {
                 $bootstrap = Join-Path $work 'bootstrap.ps1'
-                Invoke-WebRequest -Uri "$baseUri/bootstrap.ps1" -OutFile $bootstrap -UseBasicParsing -TimeoutSec 60
+                Invoke-DevConfigWebRequest -Parameters @{
+                    Uri = "$baseUri/bootstrap.ps1"; OutFile = $bootstrap; TimeoutSec = 60
+                }
                 Assert-DevConfigProtectedTree -Directory $work
                 if (-not $AllowUnsigned) {
                     Assert-DevConfigMicrosoftSigned -Directory $work
@@ -132,6 +220,7 @@ function Invoke-CalmOsBootstrap {
             $arguments = @('-NoProfile')
             if (-not $AllowUnsigned) { $arguments += '-ExecutionPolicy', 'RemoteSigned' }
             $arguments += '-File', $target, '-Ref', $Ref, '-InstallRoot', $InstallRoot, '-Action', $Action
+            if ($Workload -ne 'devconfig') { $arguments += '-Workload', $Workload }
             if ($AllowUnsigned) { $arguments += '-AllowUnsigned' }
             if ($NoLaunch) { $arguments += '-NoLaunch' }
             & (Join-Path $PSHOME $shellName) @arguments
@@ -143,7 +232,9 @@ function Invoke-CalmOsBootstrap {
         # PowerShell also recognizes smart quotes as string delimiters.
         $escapedRef = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Ref)
         $escapedRoot = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($InstallRoot)
-        $command = "& {`n$launcher`n} -Ref '$escapedRef' -InstallRoot '$escapedRoot' -Action '$Action'"
+        $command = "function Invoke-DevConfigWebRequest {`n${function:Invoke-DevConfigWebRequest}`n}`n" +
+            "& {`n$launcher`n} -Ref '$escapedRef' -InstallRoot '$escapedRoot' -Action '$Action'"
+        if ($Workload -ne 'devconfig') { $command += " -Workload '$Workload'" }
         if ($AllowUnsigned) { $command += ' -AllowUnsigned' }
         if ($NoLaunch) { $command += ' -NoLaunch' }
         # Start-Process joins arguments; Windows quoting keeps the command intact.
@@ -157,18 +248,74 @@ function Invoke-CalmOsBootstrap {
         Write-Verbose "Could not raise the TLS version: $($_.Exception.Message)"
     }
 
-    if ($Ref -notmatch '^[a-fA-F0-9]{40}$') {
-        $resolvedRef = (Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$([Uri]::EscapeDataString($Ref))" -UseBasicParsing -TimeoutSec 60).sha
-        if ($resolvedRef -isnot [string] -or $resolvedRef -notmatch '^[a-fA-F0-9]{40}$') {
-            throw "GitHub did not return a commit SHA for '$Ref'. Setup was not started."
+    function Resolve-CalmOsRef {
+        param(
+            [Parameter(Mandatory)] [string] $Ref
+        )
+
+        if ($Ref -match '^[a-fA-F0-9]{40}$') {
+            return $Ref
         }
-        $Ref = $resolvedRef
+
+        try {
+            $response = Invoke-DevConfigWebRequest -Parameters @{
+                Uri = "https://github.com/$repo.git/info/refs?service=git-upload-pack"
+                Headers = @{ 'Git-Protocol' = 'version=0' }; TimeoutSec = 60
+            }
+        } catch {
+            throw "Could not resolve '$Ref' from $repo ($($_.Exception.Message)). Check your internet connection or proxy settings, then run this again."
+        }
+        $advertisement = if ($response.Content -is [byte[]]) {
+            [Text.Encoding]::UTF8.GetString($response.Content)
+        } else {
+            [string]$response.Content
+        }
+        if (-not $advertisement.StartsWith("001e# service=git-upload-pack`n0000")) {
+            throw "GitHub did not return Git refs for $repo. Setup was not started."
+        }
+
+        $names = if ($Ref.StartsWith('refs/') -or $Ref -ceq 'HEAD') {
+            @($Ref)
+        } else {
+            @("refs/tags/$Ref", "refs/heads/$Ref")
+        }
+        foreach ($name in $names) {
+            # Annotated tags advertise the target commit with a ^{} suffix.
+            foreach ($candidate in @("$name^{}", $name)) {
+                $pattern = '(?m)^(?:0000)?[a-fA-F0-9]{4}([a-fA-F0-9]{40}) ' +
+                    [regex]::Escape($candidate) + '(?:\x00[^\n]*)?\r?$'
+                $match = [regex]::Match($advertisement, $pattern)
+                if ($match.Success) {
+                    return $match.Groups[1].Value
+                }
+            }
+        }
+        throw "$repo has no advertised branch or tag called '$Ref'. Check the name, or use a full 40-character commit SHA."
     }
+
+    $refName = $Ref
+    $Ref = Resolve-CalmOsRef -Ref $Ref
+    $flow = if ($AllowUnsigned) { 'src/windows-dev-config' } else { 'windows-dev-config' }
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        $command = Get-CalmOsElevationCommand -Ref $Ref -InstallRoot $InstallRoot -AllowUnsigned:$AllowUnsigned -NoLaunch:$NoLaunch -Action $Action
+        # The elevated window closes on errors, so a ref without the workload is reported here, before UAC.
+        if ($Workload -ne 'devconfig') {
+            try {
+                $null = Invoke-DevConfigWebRequest -Parameters @{
+                    Uri = "https://raw.githubusercontent.com/$repo/$Ref/$flow/workloads/$Workload.ps1"
+                    Method = 'Head'; TimeoutSec = 60
+                }
+            } catch {
+                $failure = $_
+                $status = $null
+                try { $status = [int]$failure.Exception.Response.StatusCode } catch { }
+                if ($status -ne 404) { throw $failure }
+                throw "'$refName' doesn't contain the '$Workload' workload under $flow. Check the workload name, or pick a newer -Ref."
+            }
+        }
+        $command = Get-CalmOsElevationCommand -Ref $Ref -InstallRoot $InstallRoot -AllowUnsigned:$AllowUnsigned -NoLaunch:$NoLaunch -Action $Action -Workload $Workload
         Write-Host 'Setup needs Administrator rights (a UAC prompt will appear)...' -ForegroundColor Yellow
         $proc = Start-Process -FilePath $shell -ArgumentList ($arguments + @('-Command', $command)) -Verb RunAs -Wait -PassThru
         if ($proc.ExitCode -ne 0) {
@@ -176,7 +323,7 @@ function Invoke-CalmOsBootstrap {
         }
         if ($NoLaunch) {
             $escapedTarget = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent((Join-Path $InstallRoot 'dev-config.ps1'))
-            Write-Host "Run when ready: & '$escapedShell' $($arguments -join ' ') -File '$escapedTarget' -Action $Action$(if ($AllowUnsigned) { ' -AllowUnsigned' })"
+            Write-Host "Run when ready: & '$escapedShell' $($arguments -join ' ') -File '$escapedTarget' -Action $Action$workloadSuffix$(if ($AllowUnsigned) { ' -AllowUnsigned' })"
         }
         return
     }
@@ -186,44 +333,26 @@ function Invoke-CalmOsBootstrap {
             [Parameter(Mandatory)] [string] $Destination
         )
 
-        $candidates = @(
-            "https://github.com/$repo/archive/refs/heads/$Ref.zip"
-            "https://github.com/$repo/archive/$Ref.zip"
-        )
-
-        $lastError = $null
-        $everyAttemptWas404 = $true
-        foreach ($url in $candidates) {
-            foreach ($attempt in 1..3) {
-                try {
-                    Invoke-WebRequest -Uri $url -OutFile $Destination -UseBasicParsing -TimeoutSec 300
-                    return
-                } catch {
-                    $lastError = $_
-                    $status = $null
-                    try { $status = [int]$_.Exception.Response.StatusCode } catch { }
-                    if ($status -eq 404) { break }
-                    $everyAttemptWas404 = $false
-                    if ($attempt -lt 3) {
-                        Write-Host "  Download attempt $attempt didn't work -- trying again..." -ForegroundColor DarkGray
-                        Start-Sleep -Seconds (5 * $attempt)
-                    }
-                }
+        try {
+            Invoke-DevConfigWebRequest -Parameters @{
+                Uri = "https://github.com/$repo/archive/$Ref.zip"; OutFile = $Destination; TimeoutSec = 300
             }
+        } catch {
+            throw "Could not download '$Ref' from $repo ($($_.Exception.Message)). Check your internet connection or proxy settings, then run this again."
         }
-
-        if ($everyAttemptWas404) {
-            throw "$repo has no branch, tag or commit called '$Ref'. Check the name and run this again."
-        }
-        throw "Could not download '$Ref' from $repo ($($lastError.Exception.Message)). Check your internet connection or proxy settings, then run this again."
     }
 
     Write-Host ''
-    Write-Host 'Calm OS setup' -ForegroundColor Cyan
+    if ($Workload -eq 'devconfig') {
+        Write-Host 'Calm OS setup' -ForegroundColor Cyan
+    } else {
+        Write-Host "Windows Developer Config: $Workload workload" -ForegroundColor Cyan
+    }
     Write-Host "  Fetching '$Ref' from $repo..." -ForegroundColor DarkGray
 
-    $flow = if ($AllowUnsigned) { 'src/windows-dev-config' } else { 'windows-dev-config' }
-    $securityCode = (Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$repo/$Ref/$flow/steps/_security.ps1" -UseBasicParsing -TimeoutSec 60).TrimStart([char]0xFEFF)
+    $securityCode = (Invoke-DevConfigWebRequest -Parameters @{
+        Uri = "https://raw.githubusercontent.com/$repo/$Ref/$flow/steps/_security.ps1"; TimeoutSec = 60
+    }).Content.TrimStart([char]0xFEFF)
     if (-not $AllowUnsigned) {
         # Windows PowerShell requires UTF-16LE for in-memory signature verification.
         $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($securityCode)) -SourcePathOrExtension '.ps1'
@@ -252,6 +381,11 @@ function Invoke-CalmOsBootstrap {
         if (-not ((Test-Path (Join-Path $setupDir 'bootstrap.ps1')) -and (Test-Path (Join-Path $setupDir 'dev-config.ps1')) -and (Test-Path (Join-Path $setupDir 'steps\_security.ps1')))) {
             throw "'$Ref' doesn't contain the requested setup under $flow. Use -AllowUnsigned only for the source copy."
         }
+        # Refs that predate workloads have no workloads folder but still run the default setup.
+        $workloadsDir = Join-Path $setupDir 'workloads'
+        if ($Workload -ne 'devconfig' -and -not (Test-Path -LiteralPath (Join-Path $workloadsDir "$Workload.ps1") -PathType Leaf)) {
+            throw "'$Ref' doesn't contain the '$Workload' workload under $flow. Check the workload name, or pick a newer -Ref."
+        }
         Assert-DevConfigProtectedTree -Directory $setupDir
         if ($AllowUnsigned) {
             Write-Host '  Using the unsigned source copy because -AllowUnsigned was passed.' -ForegroundColor Yellow
@@ -265,6 +399,9 @@ function Invoke-CalmOsBootstrap {
         # Keep logs and progress when replacing setup scripts.
         Copy-Item -LiteralPath (Join-Path $setupDir 'bootstrap.ps1'), (Join-Path $setupDir 'dev-config.ps1') -Destination $InstallRoot -Force
         Copy-Item -LiteralPath (Join-Path $setupDir 'steps') -Destination $InstallRoot -Recurse -Force
+        if (Test-Path -LiteralPath $workloadsDir) {
+            Copy-Item -LiteralPath $workloadsDir -Destination $InstallRoot -Recurse -Force
+        }
         Assert-DevConfigProtectedTree -Directory $InstallRoot
         if (-not $AllowUnsigned) {
             Assert-DevConfigMicrosoftSigned -Directory $InstallRoot
@@ -278,13 +415,14 @@ function Invoke-CalmOsBootstrap {
 
         if ($NoLaunch) {
             $escapedTarget = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($target)
-            $command = "& '$escapedShell' $($arguments -join ' ') -File '$escapedTarget' -Action $Action"
+            $command = "& '$escapedShell' $($arguments -join ' ') -File '$escapedTarget' -Action $Action$workloadSuffix"
             if ($AllowUnsigned) { $command += ' -AllowUnsigned' }
             Write-Host "Run when ready: $command" -ForegroundColor Cyan
             return
         }
 
         $arguments += '-File', "`"$target`"", '-Action', $Action
+        if ($Workload -ne 'devconfig') { $arguments += '-Workload', $Workload }
         if ($AllowUnsigned) { $arguments += '-AllowUnsigned' }
         $start = @{ FilePath = $shell; ArgumentList = $arguments; Wait = $true; PassThru = $true }
         if ($Action -ne 'Uninstall') { $start.NoNewWindow = $true }
@@ -306,8 +444,8 @@ Invoke-CalmOsBootstrap @PSBoundParameters
 # SIG # Begin signature block
 # MIInRAYJKoZIhvcNAQcCoIInNTCCJzECAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCATQDfyyJZ4YKMa
-# VoQhCdw/NSp/bMqgnjdUlISq1FVpcaCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCOwhLeTPIbzOjM
+# 4d4eKuH5JqOClF/7MkBS6vEaYMmbvaCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -379,62 +517,62 @@ Invoke-CalmOsBootstrap @PSBoundParameters
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIK6OPgQTRzvSI5j5obttAURqhxSQ+qdbNxqwHAF6RH1dMEIG
+# KoZIhvcNAQkEMSIEIBlcpfZTcO/d4sea7XjeZp5413GwaEA/jo8QPrfVTHAfMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAR3DEIqiRFr2IaduP
-# waMkT0CllV6U8a4loPjgvfqdgceqzVcrjmtwW1KXcHkrhXcHk0tHXF8C2bVXNtU1
-# KBjXz4sLDx6cNlIFcZDz9WlltkKAgv+NzYjqzdwAgccmuUr5zj46vwUcfq5ILf6f
-# ew66SSa73YsygBwcxrlxeIxOxfvj4UFHNyOqU9DBQqSgGV02Mt1a2dnmVgyQv3Fp
-# 86jJgRujmH9gphE/yH+Z/AzkXMfewAVf6MMkyv4rK31g30wYB2EikbGOvo7Pt++U
-# ISsDenrcCVAn1NRbfZQZRfFfU7SvJI8XNiwiPMb+iS9iySEVXlCgux6tgXqzZky0
-# eKOMs6GCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAxcZKRwaVYMY8FMS3
+# vfdqxc0QSTcZ31lcP6XIR/vOK2JAZ1X5ljYmpBEcEl9mYYKRCk2VFPxoU+iK6kId
+# oIZKUl89hZwjW97NqJZmeDSxn6GFKPHcHA6vtfnOHs83Se9HuM1XHBb6RhYydFYm
+# PkgfV/dIhdFho7F/v+ORdAxn4OLc+Vv79xl6+j9dvKou2W5kv6E9wTmE2WFLqAFG
+# pvxKRBLI8MSHo7++tOzOpGgzyQ72SkxmC96C4Z2HIUEtGMoRvgmJI26F8fY7CxcB
+# kTUVLyQpWici/PnTz0XDDobnasp0+AIj7aHpFeEFJ3UP7oZui6/FcZrcJEdxOeMl
+# Q88EtKGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
 # gheFAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAfSzCLXsFb9T4d
-# QfXcwiZNOs0qvp58DMeSWKEeYhUpwwIGaq5gawKKGBMyMDI2MDkyNTIyNDc1Ny41
-# MzdaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCMNcA9V3+WZuni
+# R3LBxjPvp9HCtGKsxzjF2CipAyCVzwIGaq6wEaulGBMyMDI2MTAwMjAwMTU1OS4y
+# NzdaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0QzFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEf4wggcoMIIF
-# EKADAgECAhMzAAACGCXZkgXi5+XkAAEAAAIYMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
+# EKADAgECAhMzAAACHUvAkoc4hX45AAEAAAIdMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
 # BgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25k
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jv
-# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgyNVoXDTI2MTEx
-# MzE4NDgyNVowgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
+# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgzM1oXDTI2MTEx
+# MzE4NDgzM1owgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
 # DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # LTArBgNVBAsTJE1pY3Jvc29mdCBJcmVsYW5kIE9wZXJhdGlvbnMgTGltaXRlZDEn
-# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjRDMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
+# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjQzMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
 # ExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEF
-# AAOCAg8AMIICCgKCAgEAsdzo6uuQJqAfxLnvEBfIvj6knK+p6bnMXEFZ/QjPOFyw
-# lcjDfzI8Dg1nzDlxm7/pqbvjWhyvazKmFyO6qbPwClfRnI57h5OCixgpOOCGJJQI
-# ZSTiMgui3B8DPiFtJPcfzRt3FsnxjLXwBIjGgnjGfmQl7zejA1WoYL/qBmQhw/FD
-# FTWebxfo4m0RCCOxf2qwj31aOjc2aYUePtLMXHsXKPFH0tp5SKIF/9tJxRSg0NYE
-# vQqVilje8aQkPd3qzAux2Mc5HMSK4NMTtVVCYAWDUZ4p+6iDI9t5BNCBIsf5ooFN
-# UWtxCqnpFYiLYkHfFfxhVUBZ8LGGxYsA36snD65s2Hf4t86k0e8WelH/usfhYqOM
-# 3z2yaI8rg08631IkwqUzyQoEPqMsHgBem1xpmOGSIUnVvTsAv+lmECL2RqrcOZlZ
-# ax8K0aiij8h6UkWBN2IA/ikackTSGVRBQmWWZuLFWV/T4xuNzscC0X7xo4fetgps
-# qaEA0jY/QevkTvLv4OlNN9eOL8LNh7Vm0R65P7oabOQDqtUFAwCgjgPJ0iV/jQCa
-# MAcO3SYpG5wSAYiJkk4XLjNSlNxU2Idjs1sORhl7s7LC6hOb7bVAHVwON74GxfFN
-# iEIA6BfudANjpQJ0nUc/ppEXpT4pgDBHsYtV8OyKSjKsIxOdFR7fIJIjDc8DvUkC
-# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBQkLqHEXDobY7dHuoQCBa4sX7aL0TAfBgNV
+# AAOCAg8AMIICCgKCAgEAorSgaAA8oOl4ph574zw29egUN8DDepRHLX8FM1zHNJmX
+# G6KrSqUKwzcKafopuYdPTETTCvb9aJfESuAU0iGNUFI/D6R0kvdfpe2oPX+E3sbT
+# QvGi4JPH5qdIYUaJ45V/4bqe8eNvbWzpC+ZKjH193DeiI1XAI918JoQmBhlEXo/T
+# on1721luZJgincsf5LjMY3jX84WyXUSX3dsS7h/7xVI+w1yjg7pa+0y3o/me2Tsv
+# 6UJUdSTQap5ORGSfCnclnP1z3IiiWIWr3Vo7aIPWsgJzq3m5GxpxUHCQk8qzUhk5
+# 0y/uB+LGE3WIK2C77iy9iFsSfSLUnyMEzGRDW9mXHT4PH7Ozz6CHqQEiNvwcHqlv
+# lCh1pHQh1NXQSAqOoVBs5mi6easf6yxWTfe5DrR79503r8pU6VqC2Y9XMRU4wH9Q
+# bYXYsIUZ33Jmndy22W1LBDAbxBPQHCBlncGDU3BgdhVUVLe80mggFO98FdkWho67
+# w4kPdCTRkvdvkY8PrQYE/nQjHXCa0g7LcMttZb6ejMHfQ+tUWXv6+nZ4Ynkr2Oka
+# xclFCw4RIYNMWD26AWbQj/WEdzga18fKtw66L5gzXPza6jFBfPJeKE3H8QAuwpir
+# mH4ms+5nUjNNQOmNgqJn0U1+3Yn7ClswD79YN0r3fdbYBMDApBZJpNlK7q7HXRsC
+# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBSEWfBxNEamZtXm8gl92Yq80jfxXTAfBgNV
 # HSMEGDAWgBSfpxVdAF5iXYP05dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5o
 # dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBU
 # aW1lLVN0YW1wJTIwUENBJTIwMjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwG
 # CCsGAQUFBzAChlBodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRz
 # L01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNV
 # HRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIH
-# gDANBgkqhkiG9w0BAQsFAAOCAgEAnkjRhjwPgdoIpvt4YioT/j0LWuBxF3ARBKXD
-# ENggraKvC0oRPwbjAmsXnPEmtuo5MD8uJ9Xw9eYrxqqkK4DF9snZMrHMfooxCa++
-# 1irLz8YoozC4tci+a4N37Sbke1pt1xs9qZtvkPgZGWn5BcwVfmAwSZLHi2CuZ06Y
-# 0/X+t6fNBnrbMVovNaDX4WPdyI9GEzxfIggDsck2Ipo4VXL/Arcz7p2F7bEZGRuy
-# xjgMC+woCkDJaH/yk/wcZpAsixe4POdN0DW6Zb35O3Dg3+a6prANMc3WIdvfKDl7
-# 5P0aqcQbQAR7b0f4gH4NMkUct0Wm4GN5KhsE1YK7V/wAqDKmK4jx3zLz3a8Hsxa9
-# HB3GyitlmC5sDhOl4QTGN5kRi6oCoV4hK+kIFgnkWjHhSRNomz36QnbCSG/BHLEm
-# 2GRU9u3/I4zUd9E1AC97IJEGfwb+0NWb3QEcrkypdGdWwl0LEObhrQR9B1V7+edc
-# yNmsX0p2BX0rFpd1PkXJSbxf8IcEiw/bkNgagZE+VlDtxXeruLdo5k3lGOv7rPYu
-# OEaoZYxDvZtpHP9P36wmW4INjR6NInn2UM+krP/xeLnRbDBkm9RslnoDhVraliKD
-# H62BxhcgL9tiRgOHlcI0wqvVWLdv8yW8rxkawOlhCRqT3EKECW8ktUAPwNbBULkT
-# +oWcvBcwggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
+# gDANBgkqhkiG9w0BAQsFAAOCAgEAkdweB4yxvLspLKq0D+miyD4Q0EcxVFpNZuJx
+# iR54gWRkeTDDuymNeB03JhlsBpbwSYJ5uZSgDBCvwHED2VL8lJpFlOprJzxsXWC2
+# NTfA+O+PO5Fk5jw6LHh6jeBADDEdQAx3Hqi7Zm0JwvQ93z5f6dtxkm29WqOcHYXR
+# XfAQwy1hSrLXyfeblqR66jpP/9n0fCkWU4ggsUjQpQ2Ngj1DV09J4Y3y7p9Nd81+
+# Xs6qYo++7RKm8qiB/5NDeigOLjlAeFgiEXIRUJW+mJyqpQw+OORlaqcFjR8Hu0G+
+# /7bMdek68YX+kPpDBk7Ue+I/xgiYJ1xcDRBn/vczLtN72+RIlD4UgXYLuBSCk//p
+# DEPX5z39Cr+rkc6E4Y28FPk4BhloAyvp628P4xfElQY8TcxraUbZShypocE6ny95
+# D1K1BkltZmrHVKCxmglnuOlM15NKIrXFlXCzdqpCtIwQ417wNAVF/QDPvzzbumPd
+# Ti6fb0tLbScYobV6zvbBsMsKEME4Tj1b9oIXC8dybJq4nbboEXYpRwi1QAbpSNrn
+# +PxGW9uf1q63FnMJu4gm3Oh63njW/iVf723quzyHrSijWMgY0HiRiHQi0Jyu0h8M
+# dhRUp7mxbmLQckPiOFwAlIaUN/k725y/aLWpkRU6fqmLlEOyH5WpyLd23AYy9r8v
+# +Qoba6swggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
 # DQEBCwUAMIGIMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
 # A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIw
 # MAYDVQQDEylNaWNyb3NvZnQgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAx
@@ -477,41 +615,41 @@ Invoke-CalmOsBootstrap @PSBoundParameters
 # AkECAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0QzFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaIjCgEBMAcGBSsO
-# AwIaAxUAnWtGrXWiuNE8QrKfm4CtGr57z+mggYMwgYCkfjB8MQswCQYDVQQGEwJV
+# AwIaAxUAuoO+BKbfXzqyfi9GLEdWHkCLeT+ggYMwgYCkfjB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5hb/kwIhgPMjAyNjA5
-# MjUyMjExMDVaGA8yMDI2MDkyNjIyMTEwNVowdzA9BgorBgEEAYRZCgQBMS8wLTAK
-# AgUA7mFv+QIBADAKAgEAAgIU9AIB/zAHAgEAAgIcPTAKAgUA7mLBeQIBADA2Bgor
+# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5o/zUwIhgPMjAyNjEw
+# MDExNTQ4MDVaGA8yMDI2MTAwMjE1NDgwNVowdzA9BgorBgEEAYRZCgQBMS8wLTAK
+# AgUA7mj/NQIBADAKAgEAAgIfeQIB/zAHAgEAAgITHTAKAgUA7mpQtQIBADA2Bgor
 # BgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAID
-# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQAeo4hcBkDHJvMqnXMBPQa9Yk9gxdpiG722
-# TrK829CA+jmOSrw7n/rUoAv6kBvPRFTuGQQLU3RNXUvHKYUfTMFdZwz943MSY24M
-# cEjZkqGEnEA1cIWJioY+L+ykw6h/7tGCMhsnKx9gvfU94HE52RBOFRgruZ7ZMPnx
-# pof9SXmBzPh0n55gcZTTe7bWtghutbuTwRcIrC0yrLZ7ZC4JWJRCAlBEh2axSSsi
-# AcUDqtXIeyu0FYID2UQeIeTjw13Iuoqcg5bFcCpJusPXsc4essdEA5hZ5if98I/u
-# 56K9m9E3BV79ibDdtTalQobtqym8CfNtnhekCK99GZw913SE3u4wMYIEDTCCBAkC
+# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQBXiUrdIpYDAKJzqp7i4ekZ/oUdLEcEXgOY
+# +PJBzdJaub44DsE/6hTNvMqMYGdXcXELA7BxiVtYrpqoxhJ2Ul/qu79YIvhznnoW
+# MV+ORZa0nCnUxklIwOIetGpPS78ywcLpqBjvgLWDR/BhOIEftFWcEhEKQGqoCTb6
+# UOR9akqgYKyMF9QkNKGMdQDPNUPBT5X27OJ8Jh4N4/QgC7umXylD75zzoJWrwk7i
+# K0g/t5hnSNPuDt7o1SXvAGAl91Ar4NmozwxVJ3TprlKnptjHTXv+J99rmitHnqdv
+# snvEA8a32qknkfoVEsYV5C9Y7/B+l0UtAjkpdTu9M+vE4zSh/+UBMYIEDTCCBAkC
 # AQEwgZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNV
 # BAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQG
-# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIYJdmSBeLn
-# 5eQAAQAAAhgwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
-# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgmZ64t1en8EfyjlQKL33LsyIA86knQdZy
-# VmNJcv1YE0owgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCZE9yJuOTItIwW
-# aES6lzGKK1XcSoz1ynRzaOVzx9eFajCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
+# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIdS8CShziF
+# fjkAAQAAAh0wDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
+# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgDLOUBpigpnhZnnqar+vNxQ89h2pwMSmX
+# dmF96gDSJ+0wgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCxtpXMXEiLJzrq
+# M77ep4rTNwrMOj6gpWN9hZvpj5QFUTCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
 # EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
 # aWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0
-# YW1wIFBDQSAyMDEwAhMzAAACGCXZkgXi5+XkAAEAAAIYMCIEILSWr2K7u3iGEqAe
-# owrZ5NRbyn0zTVL5I0fnbvc2KtvvMA0GCSqGSIb3DQEBCwUABIICAJPzT10CRc5U
-# ktww3NcrwtnkLBJspnEmkxoAxgMkMtMyGWFYOIjrZtHhk4iAymPjostjK907W731
-# QlajUs9fOXDv2hTPT9dKcaEHLc8NfnJQFHK9WMvUDUcbmqiHxLqanJwJemEPHV60
-# qjL4A6VhzUJXR3BlJU9MbWu85wihwuAQp2cNfa6ef9gn5AZUorCfBl5JUt25X4Gl
-# /LQP4Lp2nOD3kDHaaKbFsjKkINYEVfLVQwRHQJYAarvB80NSC+HDr+u8dqy757ZH
-# cMQo5NgRrH9UpLsG/tWUm4uKWFO0Eg0pdsx8IqrMa1DUKArkki0ov6QMILgDx638
-# s6c7mbeKyh1k1YHquD3gYh2xUpHnIBHb3mN0ilXomM6JYh2FIyaO7ooNRKpdpr9P
-# JrCX2t3eoWBC7VpSofq14Eosdl1dV0cGwlHhH1WexC6Ehzjw+zDzuB0wpd72LP3/
-# 41/DcnbUjuLS034SH5Cvv2YQYo8v+ak9eKsWRzNvBjmAN9zZXCY3XoHyuUnHMUy5
-# 7/ijoq0tQA0HVEm1GqK+La8vSF4hLj+He5KjU98d8dNcc59RYZSQece6J9Rf4dNB
-# 4I9gvhr1QKRfHVScFAtJoxV/FAZa1Hbnj31MqKgegu/NrwpAGd5uKufo6JkfQZZS
-# T3yGP56I7//hXw/0IsW+R/tQ9OBWzikr
+# YW1wIFBDQSAyMDEwAhMzAAACHUvAkoc4hX45AAEAAAIdMCIEIIo6yj+m7hkeyYN5
+# 90Re837ierTqrD9ke1ILg45dU4AuMA0GCSqGSIb3DQEBCwUABIICAC+uWfsm4grn
+# YQSStfIvSM3RB3xfhMmYpnaXpY5Q5yVQhLd1WNby6kcVKvwHDDEOCXvDHK3ohyon
+# DMSnxbnnoOIMZGWPnuY9hDc9xxj/8Qy1o6Dj5meed2/UaNXFCZfD6dgB7akaYZqr
+# 8KktsOiCxfuGjOe7GuNWWHF7LKXpnSmqsO4lpK7cG6cVtlZMIBB243TLj81BEKMl
+# KCUeK+2b2P9A5SEyFQbg0Nz7m0d4/BbPRgi6BLzDNLc9YsLP1iKUOb8KqfgH+3vj
+# gJTFmFoSl6AzAZbYXCU1Bqq44eMfO1qIQcn4k6FIwr+1jv99zHBVNQHc3k83XFAh
+# XLqZ8IPq0KWtcwU4769ZVPlXy0bZSL0Uw8DNXmF/lKUPRWqA6CjhSlpW3yukGYwc
+# pEQXfOaMnhuo3c+8xmFFPEdooqVc3SjlrIdikF5et025qbplBDNmpScHNc3gFNkn
+# VJRR5G+ItG9YuA3mqmKDTA71a7Yr6BlQ+A+jpTuiKh/tst9CdpoY2P3n57+1TDfN
+# XJCmYcMIhT5M21YYjRiC3IviW9eBQuNplFf1UIcNHo+64RWcJjb2TqG9/peUaqJc
+# zzenuB+yfON/3E+ijMGtVEHdDo9YIuM43cIB2/41mahGKeTvWjm9wbWg9FEuJKmO
+# 8zYQaHGm7FoWD2dI/28zD/P+wy0HhLbo
 # SIG # End signature block
