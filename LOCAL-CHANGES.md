@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `0dd0cbc`, 2026-10-02). Everything is upstream and
+kept in sync with upstream `main` (last merged: `231c59b`, 2026-10-03). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -259,10 +259,10 @@ Still true after these fixes, and worth knowing before running anything else in 
   `Get-AuthenticodeSignature` reports `NotSigned` for all 18. Before, they checked out with CRLF
   and 12 of the 17 under `Workloads\` were `Valid`; the other 5 (`php`, `python`, `typescript`,
   `winforms` and `winui` `install.ps1`) were already `HashMismatch`. An existing checkout keeps
-  its CRLF files until git rewrites them. Only `windows-dev-config\` (32 files at `0dd0cbc`,
-  re-committed as raw bytes in #107 and re-signed in #110, #112, #114, #126, #130 and #132) is
+  its CRLF files until git rewrites them. Only `windows-dev-config\` (32 files at `231c59b`,
+  re-committed as raw bytes in #107 and re-signed in #110, #112, #114, #126, #130, #132 and #134) is
   `Valid` in a fresh clone, plus the new `Workloads\winui\setup.ps1` from #125. Re-checked
-  2026-10-02 on a `git archive` of `0dd0cbc`: `Workloads\` is 1 `Valid`, 16 `NotSigned` and 1
+  2026-10-03 on a `git archive` of `231c59b`: `Workloads\` is 1 `Valid`, 16 `NotSigned` and 1
   `HashMismatch` (the freshly re-signed `winui\install.ps1`, committed with CRLF and a signature
   block that still does not verify), `wsl-comfort\` is 1 `NotSigned`, and `check-signed-drift.ps1`
   reports `winappcli` missing and `wsl-comfort\comfort-shell-bootstrap.sh`, `install.ps1` and
