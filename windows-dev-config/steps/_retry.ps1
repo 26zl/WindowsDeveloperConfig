@@ -11,7 +11,8 @@ function Invoke-DevConfigRetry {
         [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
         [string] $Name = 'operation',
         [int] $MaxAttempts = 3,
-        [int] $InitialDelaySeconds = 5
+        [int] $InitialDelaySeconds = 5,
+        [scriptblock] $ShouldRetry
     )
     $attempt = 0
     $delay = $InitialDelaySeconds
@@ -25,6 +26,9 @@ function Invoke-DevConfigRetry {
             if ($_.Exception -is [System.TimeoutException]) {
                 throw
             }
+            if ($ShouldRetry -and -not (& $ShouldRetry $_)) {
+                throw
+            }
             if ($attempt -ge $MaxAttempts) {
                 throw
             }
@@ -36,11 +40,84 @@ function Invoke-DevConfigRetry {
     }
 }
 
+# Bootstrap carries this self-contained helper too, before shared files are available.
+function Invoke-DevConfigWebRequest {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Parameters
+    )
+
+    $waited = 0.0
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            return Invoke-WebRequest @Parameters -UseBasicParsing -ErrorAction Stop
+        } catch {
+            $response = $null
+            $networkFailure = $false
+            for ($exception = $_.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+                if ($exception -is [Security.Authentication.AuthenticationException]) { throw }
+                if ($exception.PSObject.Properties['Response'] -and $null -ne $exception.Response) {
+                    $response = $exception.Response
+                }
+                if ($exception -is [Net.WebException]) {
+                    $networkFailure = $exception.Status.ToString() -in @(
+                        'Timeout', 'ConnectFailure', 'ConnectionClosed', 'KeepAliveFailure',
+                        'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ReceiveFailure', 'SendFailure'
+                    )
+                } elseif ($exception.GetType().FullName -in @(
+                    'System.Net.Http.HttpRequestException', 'System.Net.Http.HttpIOException',
+                    'System.Threading.Tasks.TaskCanceledException', 'System.TimeoutException'
+                )) {
+                    $networkFailure = $true
+                }
+            }
+            $status = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
+            if ($attempt -eq 4 -or
+                ($status -ne 0 -and $status -notin @(408, 429, 500, 502, 503, 504)) -or
+                ($status -eq 0 -and -not $networkFailure)) {
+                throw
+            }
+
+            $retryAfter = $null
+            if ($null -ne $response) {
+                if ($response.Headers -is [Net.WebHeaderCollection]) {
+                    $retryAfter = $response.Headers['Retry-After']
+                } elseif ($response.Headers.Contains('Retry-After')) {
+                    $retryAfter = @($response.Headers.GetValues('Retry-After'))[0]
+                }
+            }
+            $serverDelay = 0.0
+            $date = [DateTimeOffset]::MinValue
+            if ($retryAfter -match '^\d+$') {
+                if (-not [double]::TryParse($retryAfter, [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$serverDelay)) { throw }
+            } elseif ($retryAfter -and [DateTimeOffset]::TryParse($retryAfter,
+                    [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$date)) {
+                $serverDelay = [Math]::Max(0, [Math]::Ceiling(($date - [DateTimeOffset]::UtcNow).TotalSeconds))
+            } elseif ($retryAfter) {
+                Write-Verbose 'Ignoring an invalid Retry-After header.'
+            }
+
+            $backoff = 5 * [Math]::Pow(2, $attempt - 1)
+            $delay = [Math]::Max($backoff, $serverDelay)
+            $remaining = 120 - $waited
+            if ($delay -gt $remaining) {
+                Write-Host '  Download retry wait exceeds the remaining two-minute budget.' -ForegroundColor DarkYellow
+                throw
+            }
+            $jitterMilliseconds = [int][Math]::Floor([Math]::Min($backoff, $remaining - $delay) * 1000)
+            $milliseconds = [int]($delay * 1000) + (Get-Random -Minimum 0 -Maximum ($jitterMilliseconds + 1))
+            Write-Host "  Download attempt $attempt failed; retrying in $([Math]::Round($milliseconds / 1000, 1))s." -ForegroundColor DarkYellow
+            Start-Sleep -Milliseconds $milliseconds
+            $waited += $milliseconds / 1000
+        }
+    }
+}
+
 # SIG # Begin signature block
 # MIInKAYJKoZIhvcNAQcCoIInGTCCJxUCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAuq8p/Uye7+5aV
-# RpjO20YOtocrFpX+EmSuoXto4ju7x6CCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBhCJq1db6WQiY1
+# Yv3CVNgEVHOzYZYSktamkbgYA9pdVqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -112,61 +189,61 @@ function Invoke-DevConfigRetry {
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIJ4czio9TypK2l48rxI67dt4rurZc1Pn5Ub3fufU8+GcMEIG
+# KoZIhvcNAQkEMSIEICgbEmBU3lwNoNps1zzvIg3ZIYuqOv0P5rE3Knfc9pDmMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAuR/PHUspoR15tXBd
-# gyWA7sziHK1ud7V0h5sCHZSRg2TMdY7AhupHUSiTMZmpG+ocRdZE0Zw/RmUrHuKV
-# vK0PpPyN8CdKVJ75odPS5VbbsE7evo2OsJisqiIsT3L0WlgJRddOTeOscseiOwxy
-# xr3GMXNGNVYZfDMi09gdIEysEdZEXueC39RFbIL1YVhs0qMvhN2CF3LDLVe+B8P8
-# CMQtdj1N6680cNlmf5pC8CEvLLfo0Ue39UfFg5oJ0pNsJPKvPVidKfiF45ZxQHGY
-# SxL56ow+zU7/mAQiHDMR5BqGAwPNTGHnuI/W2K56AHHv2mvMKCXC83JxBCpmyCge
-# RUW3h6GCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wGCSqGSIb3DQEHAqCCF20w
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAKhrLlpvq/cnRXUEe
+# 7PKhND/12Ax+HYvNJkRNRjPMuz2yaSNQ523lV1zlzXUGGiVRziMtm2moswPrfHJW
+# 0zIZnDPQ15iKjLca0MymKtSz/x6K6+mCvXN2UIHCKKFlUcrg1h3VTTVZeQABY6wT
+# xyWP6jhJmlvBYbgVjVpyAwNL9F1muu5x/pRs2ZsrFn09EdExFOVQN/LN4nnt9lpP
+# PMKvuMTwSZs2A6SsE/Db5W1PptCSwSQJAhFNn25tDOFcbu/S9scscU1Z770mzeup
+# WxNJaBkv009ME2gDKGryGhIFn1kZRcmib9W8vh6yCFUC9m/d6WoUMJhkFlNg5pij
+# cnFkGqGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wGCSqGSIb3DQEHAqCCF20w
 # ghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG9w0BCRABBKCCAUEEggE9
-# MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDAOVxtcqMPIK/o
-# v3pMUbmHZ4WOPkWgtHiGmmhjbDRZ5wIGarUjnrUhGBMyMDI2MDkyNTIyNDkxNy4y
-# NTRaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAFmsk1yicMIjcn
+# 8H5fGyfjSzHKjl8S5BLA2grX9d/7TwIGaqnQkeIMGBMyMDI2MTAwNDIzMDc1NC4z
+# OTVaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScw
-# JQYDVQQLEx5uU2hpZWxkIFRTUyBFU046QTkzNS0wM0UwLUQ5NDcxJTAjBgNVBAMT
+# JQYDVQQLEx5uU2hpZWxkIFRTUyBFU046REMwMC0wNUUwLUQ5NDcxJTAjBgNVBAMT
 # HE1pY3Jvc29mdCBUaW1lLVN0YW1wIFNlcnZpY2WgghHqMIIHIDCCBQigAwIBAgIT
-# MwAAAifVwIPDsS5XLQABAAACJzANBgkqhkiG9w0BAQsFADB8MQswCQYDVQQGEwJV
+# MwAAAiQ7hCGwLKxkIgABAAACJDANBgkqhkiG9w0BAQsFADB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDAeFw0yNjAyMTkxOTQwMDRaFw0yNzA1MTcxOTQwMDRa
+# ZS1TdGFtcCBQQ0EgMjAxMDAeFw0yNjAyMTkxOTM5NTlaFw0yNzA1MTcxOTM5NTla
 # MIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMH
 # UmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQL
 # ExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxk
-# IFRTUyBFU046QTkzNS0wM0UwLUQ5NDcxJTAjBgNVBAMTHE1pY3Jvc29mdCBUaW1l
-# LVN0YW1wIFNlcnZpY2UwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDi
-# xWy1fDOSL4qj3A1pady+elIDLwnF3UuLzJIOWwGHcEgrxxwtnyviUIDmmxylTUl1
-# u+2rBPp2zT4BwwQhvGaJpExqvPLlDFlbfmSflKI86eFqofiZ7j8NTRO4l7wGg9Nj
-# m+muNauTcFW2qdfIjKE950Okrm9MnMOGYy+fibNYdxTPRPq1T4MLZK3s3vdMyMEO
-# ldcOQkSKpxD6/1Gk6gOmCu2KgI8f0ex6vYxnKDl9W0OLSEa/6y82oIbsm+1QBifO
-# Q47xWKTG1CmvtGr85LzA75/MAcUmRw5/of/qET0UFV1WulMcJrI6DASAsNCNB+6W
-# LrotuBZAj+VMlqbn5RMZ6Q4IY7JwaAiIXh7VjxrnwUOYZG8WEGhfrA98di+7LEn9
-# AqvvEOyG+UQcjVhCCbMGXigJXSApeyeWupCsD0jgQMNCxfB5BLBDWxgdY3dJBEPg
-# xfkgTDQLBggtVv2d5CYxHKgIItB4bI5eSb5jkIG2WotnFetT0legpw/Eozwf39ao
-# 6tENY21eVWIzRw/GsmvwjYQF6vVrxOD0pGVsfqGF8s3VPeY7hI2TxHFMqNA0IB/a
-# 2NLY7JTxYAKAP/11EJZt7xbqDLMgD1YDdGEzGpQijm3nAPCL2CebP/jmu90abJ2W
-# 425yglGHTI/nCBrwSpfRCgwzrfFelJaCKM6+35aFfwIDAQABo4IBSTCCAUUwHQYD
-# VR0OBBYEFNLW58N4MGSG6ud7jWqgT92orfReMB8GA1UdIwQYMBaAFJ+nFV0AXmJd
+# IFRTUyBFU046REMwMC0wNUUwLUQ5NDcxJTAjBgNVBAMTHE1pY3Jvc29mdCBUaW1l
+# LVN0YW1wIFNlcnZpY2UwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQCj
+# 6W3UaQ2Zr4hNvSy7j7UMPFVys7aExGB+JFwykzzXg3jayYm9gOLXJ7tNhU2emhrL
+# QCOZcgLvz6FkqmghzQxzmkgKtLYiKaEzhogO/ce0lThdLNdVtMwQOYgo+XtXAZcV
+# iBX4LcHk38RusZiF7wxSa5t/Lxic04+Z/hly1gJQpIeFDqp4a9PuLt8rsfH05vW9
+# pU9uriGdDxfJXn/lc49CxbXqA3EX17L24bc6t+mFuPDAJKKpai3XXqF2nJlpTPfd
+# rA29sWTSNKig9CtBC5tzQj0flbsa/4wqO9u+RkuwpZb3b7qnW5FdFrDR1vQmXfjl
+# yUP9ZO38839NwSuiHtvsFCNkTNIX8OL5XVq1nsKyu//GeIZ9YuxsfLBedqG024PD
+# ERyrAs0pvfUWOLapVQajHPoCnuNSKvbEh7s5IQ0YgupGji+H7rIDx2/mIEI+6Q8W
+# wBtk3Yxyhjj0GXw909i0EkTkVyy+1yADjwSC8bw2qM4+Mc4hyytlZzSc0IPUBq1Y
+# GnYwCjIwa5/lMW0pFn/HpJdB6XeMuTtYTOpaPoo64FjQryLXWjd4ovpw5lOw7X+v
+# 3E9kwN9VBC+wJESBECC1gZMCS5TaVwfE1w4pnXXb1qT9bjgRsPg4dklruUTdon/3
+# SNt0a0Q5Nc2Ul+rMlQxXoP9isXwMNnKO5JJkqRDRVQIDAQABo4IBSTCCAUUwHQYD
+# VR0OBBYEFHMfkX1u/zJLCMe0gqYitx1tAHeoMB8GA1UdIwQYMBaAFJ+nFV0AXmJd
 # g/Tl0mWnG1M1GelyMF8GA1UdHwRYMFYwVKBSoFCGTmh0dHA6Ly93d3cubWljcm9z
 # b2Z0LmNvbS9wa2lvcHMvY3JsL01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0El
 # MjAyMDEwKDEpLmNybDBsBggrBgEFBQcBAQRgMF4wXAYIKwYBBQUHMAKGUGh0dHA6
 # Ly93d3cubWljcm9zb2Z0LmNvbS9wa2lvcHMvY2VydHMvTWljcm9zb2Z0JTIwVGlt
 # ZS1TdGFtcCUyMFBDQSUyMDIwMTAoMSkuY3J0MAwGA1UdEwEB/wQCMAAwFgYDVR0l
 # AQH/BAwwCgYIKwYBBQUHAwgwDgYDVR0PAQH/BAQDAgeAMA0GCSqGSIb3DQEBCwUA
-# A4ICAQAqncud4PSC1teb2H6nRuy7sDiKK13FXJirVB4Tfwjdo2Mb+QL4j7wZ/k4G
-# 9P0CANHZFrDQcK0VFDTysrYu8Z0Aha14acDZPsyIoPvAGRRhaHEuf7NckRjkfa/y
-# lo1KyII8jbL9N9sJAqBPL8V4FNBjljv+1GHDOw127rZz5ZSTPoAPb2SA0v5yDgcp
-# UMfxglPyp6cnPPoQpTtD9OGx8Dwm2P+o1TPxBIy6I0T9RauulogVCvKwflfeLTcK
-# AvnSG1rCjerSXmU1DNXOsAD/bsrSjgbX5mAbD7XTRMF/vawAWESFcn/BjjizxeWZ
-# b00aYSlkJA2rVtFlMM481aVWXdAbXPP5RzUiWTlgyHf/G7lCxHYWGIZuB13T3aI6
-# Y8mEgn/ou40aiFJo8r0+i0P5GdNneWtxiR0CMKUfko+5s/73cwe1Wfp8BKXa270c
-# icVQasFf5sRV7pFm+V7fNRXwCu7anTOmga76zO7/2t+zOlibvphT+Q6Zd+B2qYsS
-# n4xBaY+YzHpnycLW5cvJyhPxBCcb1oRYfhRzCADb2utI2EtGCjc2P2ii4LyR4QMb
-# /n8cOweL9IqVTKKzzVk+zZJxV3vrp4LyuQXw0O30la6BcHdNAAAB9UC83zs3G9d+
-# AlIfZLM97tMUNKWjbBpIirFx6LTDFXVtZQd7hqzLYByjbjH0ujCCB3EwggVZoAMC
+# A4ICAQA+wHSbmhIpM8CRVZ4tk624hQ+LdZXE4qoeQui77CeNa3jq1FOzi7MRKkko
+# 6diEDHXPNWvAagxastCewPzm5TCNh1s4qCHh4R2G/r48wU/Mpc68/WDmJy5CIQn/
+# Fwps1sbNUEu7Bzg004qULIVJ963jo/am4xwKgwh+vSVL7/dhsfT7dvhpRddbYLQT
+# HZgwuNB6QhcEEsgogLVwNRj37VEWZDiwoMdxyC7YYrQu6MCVtizHnOtkSX7FqIoi
+# 6jlcfqfo619uDH9r8k2qAOHCeEAqKXKymIXDMcGGlEdDFbYiDZgPCBM0IHgAeilU
+# Son07wjHu0e0ssBmtBafPb4Gd+5FuRnWG3XGe91NCpLKqmFa/4GkVz9OMzZUg8oc
+# zxC/4JT3Hf45JEtszToXwNskV3JNCcu2IItr6SJHmi3EDVADDRSNhdzFRpYmplGE
+# lPl5GRoPtJiDEvRIbv5MFKIw2x9gnehf5IvBjC4ZkBg+4GTpqGE3mmnzF3nIekOk
+# X4ug0/0mN2CSarhuSi9NmHIOpUN2eQHUtgTb/+Gmq7gktCMwIq/JOCYIiTYqpv1o
+# bjAGKdWMPCrlSyNAs0jZYzkha535158NMx+wBGvsfFoVsCMG5Ocp6vW6CXyuWRbU
+# VqMU1OrQbHfdyzJpbhJC1PbAZIyJCbN+VBgDTAzTKY8w4ISSwTCCB3EwggVZoAMC
 # AQICEzMAAAAVxedrngKbSZkAAAAAABUwDQYJKoZIhvcNAQELBQAwgYgxCzAJBgNV
 # BAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4w
 # HAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xMjAwBgNVBAMTKU1pY3Jvc29m
@@ -210,40 +287,40 @@ function Invoke-DevConfigRetry {
 # yzELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1Jl
 # ZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjElMCMGA1UECxMc
 # TWljcm9zb2Z0IEFtZXJpY2EgT3BlcmF0aW9uczEnMCUGA1UECxMeblNoaWVsZCBU
-# U1MgRVNOOkE5MzUtMDNFMC1EOTQ3MSUwIwYDVQQDExxNaWNyb3NvZnQgVGltZS1T
-# dGFtcCBTZXJ2aWNloiMKAQEwBwYFKw4DAhoDFQAjHzqthPwO0GDckDMA6x54lIiM
-# KqCBgzCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
+# U1MgRVNOOkRDMDAtMDVFMC1EOTQ3MSUwIwYDVQQDExxNaWNyb3NvZnQgVGltZS1T
+# dGFtcCBTZXJ2aWNloiMKAQEwBwYFKw4DAhoDFQCmCPHbmseASfe//bGtX9eQG+0+
+# 46CBgzCBgKR+MHwxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
 # DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # JjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMA0GCSqGSIb3
-# DQEBCwUAAgUA7mDzWzAiGA8yMDI2MDkyNTEzMTkyM1oYDzIwMjYwOTI2MTMxOTIz
-# WjB0MDoGCisGAQQBhFkKBAExLDAqMAoCBQDuYPNbAgEAMAcCAQACAgrZMAcCAQAC
-# AheeMAoCBQDuYkTbAgEAMDYGCisGAQQBhFkKBAIxKDAmMAwGCisGAQQBhFkKAwKg
-# CjAIAgEAAgMHoSChCjAIAgEAAgMBhqAwDQYJKoZIhvcNAQELBQADggEBADV0RFIV
-# AjDwQfvIm+CsxfdT4Jf8PRb8WHi7mri/t/XnBpVBFpks3xeuInzbqphpDIIp8GUq
-# ePe1FF7cvgP7qkEHV6Xwwh9xZ30vgulAuBTpPpjzArZ4uoqO8mhsXD8b5m6XdkzX
-# u49NRY5AopPhJGg2OKcWi1ZBUYyqrdBEX8vEVw6LSyJn0A0i9YXhbfUvkrRDvYYq
-# e0tfgrV5JuEwFiV7hMxWzc3fkb+mSsGthIUHbYxE5jVkKbsY/mNKt6aQDFZH8LP3
-# rc52+V//xwYyfw9RUbrzLRTojrIi0jDTKWPWQEVSlwLs/55RtvGxuoyuwyF4QVFK
-# InDaaRsYsVcJoFsxggQNMIIECQIBATCBkzB8MQswCQYDVQQGEwJVUzETMBEGA1UE
+# DQEBCwUAAgUA7m1YojAiGA8yMDI2MTAwNDIyNTg0MloYDzIwMjYxMDA1MjI1ODQy
+# WjB0MDoGCisGAQQBhFkKBAExLDAqMAoCBQDubViiAgEAMAcCAQACAhkXMAcCAQAC
+# AhMNMAoCBQDubqoiAgEAMDYGCisGAQQBhFkKBAIxKDAmMAwGCisGAQQBhFkKAwKg
+# CjAIAgEAAgMHoSChCjAIAgEAAgMBhqAwDQYJKoZIhvcNAQELBQADggEBAGsi1P9t
+# o7iNJjLznSf5AJdNvsFZbjDRdeEzT6ovALLcUpbQp+3x5GAG9/286gRPgtRWAVc3
+# 7Sikzni4OUV/Ee0YttO7dTHKmpThDEW3sAgBoaZoNg3mvV+8B3PNgDs1y40EOC+4
+# kEz2rCOEoUYvp+gv9fr8MkVkAcpQKnUTV/czwayxxtzpkNh8v27rnNqHnGjkPmfx
+# 4nUvxO/s0c9jlpnna0hFGMLEIOkO2bpAS03vbe0AW0u4xDiok2wrihib/0DIU2yG
+# WGwhm9El9xliCxFtAIhGsdozeX2Oe+CP8+HlwWyMGGWDKfWCth08UhPcF5L7DVDU
+# 2tt4XZtmx0qFH40xggQNMIIECQIBATCBkzB8MQswCQYDVQQGEwJVUzETMBEGA1UE
 # CBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9z
 # b2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGltZS1TdGFtcCBQ
-# Q0EgMjAxMAITMwAAAifVwIPDsS5XLQABAAACJzANBglghkgBZQMEAgEFAKCCAUow
-# GgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqGSIb3DQEJBDEiBCDzcK9K
-# sCRNhLBwIZsuGayeDUNSNqWw5gKJlDK8af/GPzCB+gYLKoZIhvcNAQkQAi8xgeow
-# gecwgeQwgb0EIOXnARo1oVIcOLJKDqlE0adq/jZ9TXdlnXWRcXGThBFyMIGYMIGA
+# Q0EgMjAxMAITMwAAAiQ7hCGwLKxkIgABAAACJDANBglghkgBZQMEAgEFAKCCAUow
+# GgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqGSIb3DQEJBDEiBCCH9uRS
+# Jphveg10QsRZI/TJzYTRa6h1tadHnfokSVORrTCB+gYLKoZIhvcNAQkQAi8xgeow
+# gecwgeQwgb0EIEghPTdqm/dRyZ0BczXcdloVEqICdcmpVNbH9CEVzWSOMIGYMIGA
 # pH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
 # B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
-# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIn1cCDw7EuVy0A
-# AQAAAicwIgQgOyvLKWqPz41D5/4e6WOJx4OuTqg4z6loRUJh/PIQuQQwDQYJKoZI
-# hvcNAQELBQAEggIAgETUmFho3LiaIBYtv+5osp4Dq4imQ8fhkjF4gs5hoCV+nmBJ
-# U07o39BfuOsjc7HgWD9PSO4y1kVKUJHejDYu+8Arkays7OyGnhq6dM/Gk3ZzUZfz
-# jzjke/ZZQv1L2PeGjG8IFm8gFZrtrxjT3Wuc5I4Aax6m+qxBDl3n8XISepb3SG/6
-# Phu3/fSZlz4iD3f2k5JOOvGJPk+ahXicJw+/Pyp3KOSc2f2REkhCuuEeVPAc2/E9
-# L/L4lsvTSO/qMXhVXmD0KDwvv3z8YJ3jIMBaDo1Lb0sT1O0ShNwpKMXrB9fzuamH
-# +CZ+5bqfi7pc7sITMgH8rKjziA6eIXeF9Vti2Pn6batdAvppPj7mlydqsiPTxxcE
-# Kut5QPjA8Z1L0FpZLBiKNO0giEksYNONSfRWlWUH6JUtuuNqZpwwPmrtN3jWubE3
-# Ev9H2CPtp370ewaZLQvLWP+CDadhF5zcoI0hpH2bH8d9Vip+DRDBiog2XHoTUNmV
-# UXGQhs80HOL3NZbFQEZRPAGm+QKn1ZO3ABnQw27zX2p69sQtlhwM5ohqkyZ9zjiJ
-# U+ErXBTkmsawvp2H0MCrbXCkbR0QnVppO1Y2es0rCI9SnruqsNYOxxCDAL5NDmM4
-# YoRcf25ePnTuRf8n/IL+/ix4fb8fV1ivI4Z0UX+HipwNAm5rDc7KPZrTIT4=
+# AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIkO4QhsCysZCIA
+# AQAAAiQwIgQgU5mURO/zHrPYrcuVg2YCid3UmRN0SRCskRN3ZhvyOYkwDQYJKoZI
+# hvcNAQELBQAEggIAF1ArXwOxzXUvtQ1aWrBquEi8l2q7Mbf0BQVpMDfFSdUkWoHd
+# 3W3EUvh+DOIvu494fGzqhK+Bqf7uZsYtwh6F2aiT44UCsV/SiKTmWWfNNg6zrCZg
+# vC9XRAdXNrJeJ10JftKm8gBK62e1GGYFlLIQbyQlD5VdDnvJ01H9BJ9dJ6Yw1Zyl
+# WVLEVet/bo/UWAWEX8qIvVuegq+FYzq3i72wlimHfYFwMmfUBAA1sz4hXm/lXKnC
+# 2VvmuLBmGD1GWwhm2r9cz6kUgg6SrhLIbhEmsPhQludG8/M2e0fTlVZ9B/NwwM8S
+# i65RmHbFmH+00+Mzik6WXHwGV9lU2niHJz6BZHQ2kZZtId87J/PWep5FLTjUzbSL
+# YTDrzXVpArQL/NUiCEmv3v+xspX2+/LCqjal5edkMz4nO5NzN3iRSFdmkPlJEVgQ
+# tYSiOAavFjF3OB/pQepHPCcIrq6HB0j7vYhzARgnmNg+ZI3x4lYl30vWP7kVun5Q
+# R8FIi+FHwZZMh2zLT6yPbFyyLkxbDTCKUWkjAXLpAIjp3lqhl2NT0vpd9Mvx4mZu
+# x3P+KFQReu8XHzMsTxJ+32l//IvPz2ARvBeoePu7oVjZI9jXixC/wToe0gFtg+LL
+# VX4A/6WVvbFWZ7qgNyOLLugFIo3ewqJq2lrmSJvBG92VaNIDAwuUIBOCzlU=
 # SIG # End signature block

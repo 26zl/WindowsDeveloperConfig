@@ -12,6 +12,7 @@ It is **idempotent** — every change is checked before it's made, so re-running
 
 - [Quick start](#quick-start)
 - [Setup actions](#setup-actions)
+- [Single workloads](#single-workloads)
 - [What to expect](#what-to-expect)
 - [Requirements](#requirements)
 - [Before you run this](#before-you-run-this)
@@ -32,8 +33,7 @@ It is **idempotent** — every change is checked before it's made, so re-running
 Run this in Windows PowerShell 5.1 or PowerShell 7. Bootstrap requests elevation when needed:
 
 ```powershell
-$url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
-& ([scriptblock]::Create((irm $url)))
+irm https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/windows-dev-config/setup-full.ps1 | iex
 ```
 
 You'll get one UAC prompt before setup and another after the restart.
@@ -43,15 +43,17 @@ Bootstrap avoids publisher-trust prompts by default. Organization policy can req
 <details>
 <summary><strong>What the command does</strong></summary>
 
-`irm` (`Invoke-RestMethod`) downloads [`bootstrap.ps1`](./bootstrap.ps1). The script block runs it with any supplied switches. Bootstrap then:
+`irm` (`Invoke-RestMethod`) downloads [`setup-full.ps1`](./setup-full.ps1). This launcher downloads and verifies [`bootstrap.ps1`](./bootstrap.ps1) from its pinned payload commit, then runs it with that full commit SHA. Bootstrap then:
 
-1. Resolves the ref to a commit and requests UAC consent if needed.
+1. Uses the pinned commit without a ref lookup and requests UAC consent if needed.
 2. Verifies the downloaded security helper, then downloads the repository ZIP into an administrator-protected temporary directory.
 3. Verifies the Microsoft Corporation signature on every `.ps1` in the repository-root `windows-dev-config/` folder.
-4. Copies [`bootstrap.ps1`](./bootstrap.ps1), [`dev-config.ps1`](./dev-config.ps1), and [`steps/`](./steps) to `%ProgramData%\CalmOS`. Administrators/SYSTEM own and can modify the files; ordinary users have read/execute access.
+4. Copies [`bootstrap.ps1`](./bootstrap.ps1), [`dev-config.ps1`](./dev-config.ps1), [`steps/`](./steps), and [`workloads/`](./workloads) to `%ProgramData%\CalmOS`. Administrators/SYSTEM own and can modify the files; ordinary users have read/execute access.
 5. Rechecks permissions and signatures, unblocks files, removes temporary downloads, and launches setup.
 
 Files stay on disk so setup can load its helpers and resume after reboot.
+
+Each setup entry point prioritizes its running shell's built-in modules so switching between PowerShell 7 and Windows PowerShell does not break signature verification.
 
 For elevation, the launcher downloads and verifies the bootstrap, installs it in the protected directory, and runs it with `-File`.
 
@@ -75,8 +77,7 @@ search, search highlights, Widgets, and WinUI templates. It still
 installs the WinUI Copilot plugin.
 
 ```powershell
-$url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
-& ([scriptblock]::Create((irm $url))) -Action Partial
+irm https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/windows-dev-config/setup-standard.ps1 | iex
 ```
 
 The action is preserved across elevation, PowerShell relaunch, and reboot.
@@ -96,8 +97,37 @@ irm https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/wind
 
 Replace `setup-full.ps1` with the chosen wrapper. Short URLs should point to these
 repository-root release files, not `src/`. All three require `| iex` to execute.
-The wrappers accept no setup options and verify the Microsoft signature of the
-downloaded `bootstrap.ps1` before running it with the fixed action.
+The wrappers accept no setup options. Each embeds a full payload commit SHA,
+verifies the Microsoft signature of `bootstrap.ps1` downloaded from that commit,
+and passes the same SHA to bootstrap with the fixed action. The production path
+does not use Git ref discovery or the GitHub REST API to select its payload.
+WinGet setup also avoids the GitHub REST API by downloading a pinned official release directly.
+
+## Single workloads
+
+The same engine can apply one developer workload instead of the whole workstation. It works like the
+full setup, with the same elevation, signature checks, PowerShell 7 switch, check/apply/verify steps,
+log, and summary. It does not need `winget configure`, the Visual C++ Redistributable, or a clone.
+
+| Workload | Installs | One-liner |
+| -------- | -------- | --------- |
+| `winui` | Developer Mode, PowerShell 7, .NET SDK 10, Windows App CLI, Visual Studio Community 2026 with the .NET desktop and WinUI application development workloads, and the WinUI `dotnet new` templates | `irm https://aka.ms/devconfig/winui/setup.ps1 \| iex` |
+
+The short URL points at the signed wrapper [`Workloads/winui/setup.ps1`](../Workloads/winui/setup.ps1),
+which verifies and runs `bootstrap.ps1 -Workload winui -Action Full`. To pick a workload with the
+bootstrap directly, pass `-Workload`:
+
+```powershell
+$url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
+& ([scriptblock]::Create((irm $url))) -Workload winui
+```
+
+Workloads support `-Action Full` only for now. The WinUI workload adds its Visual Studio workloads to
+Visual Studio Community 2026. Community is installed next to any other edition, and an installed copy
+is not upgraded because Visual Studio updates itself. Visual Studio must be closed while its workloads
+are added; a restart requested by the Visual Studio Installer is listed in the summary. Each workload logs
+to `<workload>-log.txt`, for example `%ProgramData%\CalmOS\winui-log.txt`. Workloads share the run lock,
+so only one setup runs at a time.
 
 ## What to expect
 
@@ -118,7 +148,7 @@ Afterwards, open **Ubuntu** from the Start menu once to create your Linux userna
 
 - **Windows 11.** Built and tested against current Windows 11 releases. A few of the settings only exist on newer builds; on older ones those steps are skipped rather than failing the run. Windows 10 is not supported.
 - **Administrator rights** on the machine, and the ability to accept both UAC prompts.
-- **Internet access** to `github.com`, `api.github.com`, `raw.githubusercontent.com`, the PowerShell Gallery, and the winget package sources. Behind a proxy, the run needs your proxy configured for WinHTTP and for `winget`.
+- **Internet access** to `github.com`, `raw.githubusercontent.com`, `codeload.github.com`, `release-assets.githubusercontent.com`, the PowerShell Gallery, and the winget package sources. Behind a proxy, the run needs your proxy configured for WinHTTP and for `winget`.
 - **Hardware virtualization available to the OS** — WSL cannot install without it. On a physical machine that means VT-x / AMD-V enabled in BIOS/UEFI. In a VM it means the host has exposed nested virtualization to the guest. Everything except WSL still works without it; see [Troubleshooting](#troubleshooting).
 - **About 15 GB of free disk space** for the full package set.
 
@@ -147,7 +177,11 @@ Every one of these is listed in full detail in [What it changes](#what-it-change
 
 Installed with winget from the `winget` source, silently, with agreements accepted:
 
-Before installing packages, setup checks the WinGet module's connection. An RPC connection failure triggers one repair and retry, then a fallback to `winget.exe` if it can query packages. If neither works, setup stops with a repair message.
+Before installing packages, setup checks the WinGet module's connection. An RPC connection failure triggers one repair and retry, then a fallback to `winget.exe` if it can query packages. If neither front end works, setup stops with a repair message.
+
+Package queries and installs use the `winget` source. Recognized source failures retry up to three attempts. If recovery fails, remaining package operations are skipped and flagged for that run, while independent local settings continue. Check your connection and WinGet source configuration, then run setup again to retry. Package-specific installation failures retain their own retries.
+
+Run `src\tests\calm-os\winget-source-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7 to check this behavior with simulated package operations, without changing the machine.
 
 | Package | winget id |
 | ------- | --------- |
@@ -255,6 +289,8 @@ These are **best-effort**: they need the network and a PATH that has just been u
 
 Nothing *inside* the distro is configured by this flow. For that, see [WSL Comfort](../wsl-comfort/readme.md).
 
+Readiness and distro-list checks use closed standard input so a missing WSL runtime cannot pause them at an installation prompt. Installation and update commands keep their normal console behavior.
+
 ## How it works
 
 ### The phases
@@ -263,7 +299,7 @@ Nothing *inside* the distro is configured by this flow. For that, see [WSL Comfo
 
 | # | Phase | Notes |
 | - | ----- | ----- |
-| 1 | Getting ready | Confirms PowerShell 7, then updates winget to the latest public stable release |
+| 1 | Getting ready | Confirms PowerShell 7, then updates winget to the pinned public stable release if needed |
 | 2 | Packages | The packages above, plus the PowerToys notification setting |
 | 3 | System settings | Sudo, Developer Mode, long paths, Remote Desktop |
 | 4 | File Explorer tweaks | |
@@ -310,7 +346,7 @@ Only one restart is ever performed. If WSL still isn't usable after it, the run 
 
 ### Logs
 
-The transcript is **`devconfig-log.txt`** next to `dev-config.ps1`, normally `%ProgramData%\CalmOS\devconfig-log.txt`. Setup prints the path when it finishes.
+The transcript is **`devconfig-log.txt`** next to `dev-config.ps1`, normally `%ProgramData%\CalmOS\devconfig-log.txt`. Setup prints the path when it finishes. [Single workloads](#single-workloads) log to `<workload>-log.txt` in the same folder.
 
 The next-sign-in font update writes `%LOCALAPPDATA%\CalmOS\terminal-font.log`. Keep the setup files in place until that update has run.
 
@@ -333,9 +369,9 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
 powershell.exe -NoProfile -File .\src\windows-dev-config\dev-config.ps1 -AllowUnsigned
 ```
 
-Add [`-Action Partial`](#setup-actions) for the reduced setup.
+Add [`-Action Partial`](#setup-actions) for the reduced setup, or [`-Workload winui`](#single-workloads) for a single workload.
 
-**Pin a tag, or try a branch.** `-Ref` accepts a branch, tag, or commit SHA. Bootstrap resolves it once so its downloads use the same commit. Pass arguments with a script block, not `| iex`:
+**Pin a tag, or try a branch.** `-Ref` accepts a branch, tag, or full 40-character commit SHA. Bootstrap resolves branches and tags once through Git ref discovery so its downloads use the same commit without consuming the GitHub REST API quota. Abbreviated commit SHAs are not supported. Pass arguments with a script block, not `| iex`:
 
 ```powershell
 $url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/src/windows-dev-config/bootstrap.ps1'
@@ -364,7 +400,9 @@ $url = 'https://raw.githubusercontent.com/microsoft/WindowsDeveloperConfig/main/
 
 **What runs elevated.** The setup runs elevated after each UAC prompt. It needs Administrator for the `HKLM` settings, the WSL Windows features, and machine-wide package installs. The logon task itself runs at normal privilege, so it cannot silently elevate modified files.
 
-**What it downloads, and from where.** GitHub (this repository, the pinned Cascadia Code release, which is checked against a SHA-256, and the latest `microsoft/winget-cli` release), the PowerShell Gallery (the `Microsoft.WinGet.Client` module), the winget package sources, and the GitHub favicon used as the Copilot profile icon. Failing to fetch the icon is not treated as an error, and neither is failing to look up the latest winget version.
+**What it downloads, and from where.** GitHub (this repository, the pinned Cascadia Code release, and the pinned `microsoft/winget-cli` installer and dependencies), the PowerShell Gallery (the `Microsoft.WinGet.Client` module), the winget package sources, and the GitHub favicon used as the Copilot profile icon. The font and WinGet downloads are checked against pinned SHA-256 hashes. GitHub downloads can still be throttled even though bootstrap and WinGet setup avoid the REST API. Failing to fetch the icon is not treated as an error.
+
+**Download retries.** Once bootstrap is running, its HTTP requests and the WinGet release downloads retry transient failures up to four attempts, using randomized exponential delays and honoring `Retry-After`. Retry waits total at most two minutes per request, in addition to request execution time. If the server asks for a longer wait than remains, the request fails rather than retrying early. Bootstrap stops if required files cannot be fetched or verified; a failed WinGet update is flagged and setup can continue with a working installation. The initial launcher fetches are outside this retry policy.
 
 **Code signing.** Production requires valid Microsoft Corporation Authenticode signatures. Before execution, the elevation launcher verifies the bootstrap's signature and confirms the installed copy has the same hash. Bootstrap verifies its security helper before loading it and every payload `.ps1` before and after copying, including with `-NoLaunch`. Each production launch rechecks permissions and signatures before loading other helpers. Failed checks stop setup. `-AllowUnsigned` skips signature verification for source development.
 
@@ -393,9 +431,9 @@ The UAC prompt was declined. Nothing was changed. Run the command again and acce
 </details>
 
 <details>
-<summary><strong>"Calm OS setup is already running in another window"</strong></summary>
+<summary><strong>"Setup is already running in another window"</strong></summary>
 
-Exactly what it says — switch to the other window. Two copies would fight over the same installs. If you're sure nothing is running, the previous process didn't exit cleanly; sign out and back in, or restart, and try again.
+Exactly what it says — switch to the other window. Two copies would fight over the same installs, so the full setup and single workloads share this lock. If you're sure nothing is running, the previous process didn't exit cleanly; sign out and back in, or restart, and try again.
 
 </details>
 
@@ -431,11 +469,15 @@ If virtualization is definitely on and WSL still won't activate after the restar
 <details>
 <summary><strong>winget can't be updated</strong></summary>
 
-The setup updates winget to the latest [microsoft/winget-cli](https://github.com/microsoft/winget-cli/releases/latest) public stable release. If it can't — usually because the built-in `winget` command is being used and the PowerShell module isn't reachable — update **App Installer** from the Microsoft Store, or install the latest release directly, then run the setup again.
+The setup targets the public stable release pinned in [`steps/_winget.ps1`](steps/_winget.ps1). Older or missing installations use direct GitHub release downloads, with SHA-256 checks and Windows package-signature enforcement. This works with either the PowerShell module or the built-in `winget` command. If it fails, update **App Installer** from the Microsoft Store, or install an official [WinGet release](https://github.com/microsoft/winget-cli/releases), then run the setup again.
 
 The step is best-effort, so a machine that can't be updated is flagged rather than stopped, and the rest of the run continues on whatever winget it has.
 
-A winget delivered by the Store or by Windows itself can be *newer* than the latest GitHub stable release — the 1.30.x previews, for instance. That counts as up to date, not as behind. If the latest release can't be looked up at all, a working winget is left alone rather than flagged.
+Setup reuses installed dependencies that meet the required version for the same package name, publisher, and architecture.
+
+An installed version equal to or newer than the pin skips the update without a network lookup. RPC recovery re-registers the installed App Installer package locally, then retries the package query; it does not download or downgrade a newer version.
+
+To change the target release, update `DevConfigWinGetTargetVersion` and both asset hashes in `steps/_winget.ps1` together, then sign and publish the payload as usual.
 
 </details>
 
@@ -493,16 +535,17 @@ Run in an elevated PowerShell window:
 
 From source: `.\src\windows-dev-config\dev-config.ps1 -AllowUnsigned -Action Uninstall`.
 `bootstrap.ps1` also accepts `-Action Uninstall`. Cleanup uses Windows PowerShell to remove PowerShell 7.
-Per-user tools are removed through temporary tasks in the same account's non-elevated, signed-in session.
-Git and Visual Studio Code use their registered Inno uninstallers without progress windows or automatic restarts;
-other installation types use WinGet. Some uninstallers may still request Administrator approval.
+User-scope WinGet removals run through temporary tasks in the same account's non-elevated, signed-in session.
+NVM, Git, and Visual Studio Code use their direct uninstallers with the cleanup process's Administrator rights,
+without progress windows or automatic restarts. Other installation types use WinGet.
+Some uninstallers may still request Administrator approval.
 
 **Cleanup runs without confirmation and permanently deletes the `Ubuntu` distro and its files.**
 It uninstalls WSL and the tools below, including pre-existing, machine-wide, and all-user MSIX installations.
 Cleanup covers Full's configuration regardless of which setup action ran. It does not restore previous settings.
 
 - **Settings:** disable Sudo, Developer Mode, and Remote Desktop; reset Explorer, Start, search, notification, Bluetooth tray, taskbar End Task, Widgets, Edge policies, long-path, and WSL first-run settings; select the unrestricted QuietHours profile and switch app/system themes to light.
-- **Terminal:** cancel any pending next-sign-in font update; remove `defaultProfile`, `profiles.defaults`, PowerShell/Copilot/Ubuntu profile entries (including dynamically generated PowerShell entries), and the Copilot fragment.
+- **Terminal:** cancel any pending next-sign-in font update; remove `defaultProfile`, `profiles.defaults`, PowerShell/Copilot/Ubuntu profile entries (including dynamically generated PowerShell entries), and the Copilot fragment. Terminal settings are reset after WSL and tool removal to avoid recreating their profiles during cleanup.
 - **Integrations:** remove the managed Oh My Posh profile block, WinUI template package, and win-dev-skills marketplace. Custom profile code and unrelated plugins are preserved; a marketplace still used by other plugins is flagged rather than force-removed.
 - **Tools:** remove uv executables, caches, and local data; NVM; the WinUI Copilot plugin; Node.js; Copilot; Python 3.14 and its launcher/install manager; Git; GitHub CLI; Oh My Posh; Azure CLI; Coreutils; .NET SDK 10; Intelligent Terminal; PowerToys; Visual Studio Code; Windows App CLI; and PowerShell 7.
 
@@ -524,15 +567,16 @@ Edit the files under `src\windows-dev-config` in your clone, then run the [unsig
 
 | To... | Edit |
 | ----- | ---- |
-| Add or remove a package | The shared `$packages` list in [`steps/packages.ps1`](./steps/packages.ps1) |
+| Add or remove a package | Add it to the catalog in [`steps/packages.ps1`](./steps/packages.ps1), then list or remove its name in the packages phase of [`workloads/devconfig.ps1`](./workloads/devconfig.ps1) |
 | Change or drop a Windows setting | The shared `$tweaks` list in the matching `steps/registry-*.ps1` |
-| Skip the Edge policies entirely | Remove `edge.ps1` from the `$phases` list in [`dev-config.ps1`](./dev-config.ps1) |
+| Skip the Edge policies entirely | Remove the `edge.ps1` entry from the phase list in [`workloads/devconfig.ps1`](./workloads/devconfig.ps1) |
 | Keep Remote Desktop off | Delete the `RemoteDesktop` entry in [`steps/registry-system.ps1`](./steps/registry-system.ps1) |
 | Change the terminal font | `$Script:CascadiaDefaultFontFace` in [`steps/fonts.ps1`](./steps/fonts.ps1) |
 | Install a different distro | `$Script:DevConfigWslDistributionName` in [`steps/wsl.ps1`](./steps/wsl.ps1) |
 | Add something new | Copy the shape of any phase file: build steps with `New-DevConfigStep` and pass them to `Invoke-DevConfigSteps` |
+| Add a single workload | See [Adding a workload](#adding-a-workload) |
 
-A phase is just a file plus an entry in the `$phases` list. Files prefixed with `_` are shared helpers, not phases.
+A phase is just a file plus an entry in a workload's phase list. Files prefixed with `_` are shared helpers, not phases.
 
 Setup and cleanup use the same phase files and definitions. Phases marked `Uninstall = $true` provide cleanup steps.
 Package entries use `KeepOnUninstall`, `AdditionalUninstallIds`, `UninstallOrder`, and `InnoUninstall` for cleanup differences;
@@ -558,14 +602,71 @@ otherwise it deletes only the named value.
 
 Source of truth for this flow is `src/windows-dev-config/`. The copy at the repository root is the Authenticode-signed release copy, regenerated by the sign pipeline — don't edit it directly. See [`src/docs/development.md`](https://github.com/microsoft/WindowsDeveloperConfig/blob/main/src/docs/development.md#repo-layout-signed-vs-source).
 
+Run `.\src\tests\calm-os\module-path-checks.ps1` from the repository root on Windows with PowerShell 7 installed to check cross-edition module loading and signature verification without applying setup.
+
 | File | What it is |
 | ---- | ---------- |
 | `bootstrap.ps1` | Remote entry point: elevation, verified downloads, protected installation, and launch. |
 | `setup-full.ps1`, `setup-standard.ps1`, `uninstall.ps1` | Fixed-action wrappers that verify and call the signed bootstrap. |
-| `dev-config.ps1` | The orchestrator: elevation, shell selection, run lock, logging, phases, and summary. |
+| `dev-config.ps1` | The orchestrator shared by every workload: elevation, shell selection, run lock, logging, phases, and summary. |
+| `workloads/<name>.ps1` | A workload definition: its display name, supported actions, and phase list. `devconfig` is the default. |
+| `steps/_workload.ps1` | Loads and validates workload definitions, and passes each phase its parameters and step selection. |
 | `steps/_step-runner.ps1` | The check/apply/verify engine, the tally, and the flag reporting. |
 | `steps/_security.ps1` | Signature and directory-permission checks. Its signature is verified before loading unless `-AllowUnsigned` is used. |
 | `steps/_*.ps1` | Shared helpers: elevation, reboot and resume, winget, registry, Terminal settings, retry, process execution, console. |
 | `steps/<phase>.ps1` | One file per phase, each exporting a single `Invoke-<Name>Phase` function. |
 
-Adding a phase means adding one file and one line in the `$phases` list. Adding a step to an existing phase means one `New-DevConfigStep` call. Keep every step's check cheap and side-effect free — it runs on every invocation, including the fast path where nothing needs doing.
+Adding a phase means adding one file and one entry in a workload's phase list. Adding a step to an existing phase means one `New-DevConfigStep` call. Keep every step's check cheap and side-effect free — it runs on every invocation, including the fast path where nothing needs doing.
+
+Run the isolated WSL probe checks from the repository root in Windows PowerShell 5.1 and PowerShell 7; they do not install WSL:
+
+```powershell
+.\src\tests\calm-os\wsl-query-checks.ps1
+```
+
+### Publishing a release
+
+1. Sign and publish the payload files as commit A.
+2. Set `$payloadRef` to A's full SHA in the source launchers: `setup-full.ps1`, `setup-standard.ps1`, `uninstall.ps1`, and `Workloads/winui/setup.ps1`.
+3. Sign those updated launchers and publish their signed copies as commit B. Do not edit them after signing.
+
+The launchers in B download bootstrap and its payload from A. Short URLs continue
+to point at the launchers on `main`. Keep the payload commit available; publishing
+a new launcher does not change the revision used by an older launcher.
+Direct bootstrap calls with a branch or tag still use Git ref discovery.
+
+### Adding a workload
+
+A workload reuses the shared engine, so it only describes *what* to set up. Everything else — elevation,
+signature checks, the protected install, PowerShell 7, WinGet recovery, retries, logging, the run lock,
+and the summary — comes from the files above and is fixed once for every workload.
+
+1. Add `workloads/<name>.ps1`. It takes `-Action` and returns a hashtable; it must not change the machine.
+   [`workloads/winui.ps1`](./workloads/winui.ps1) is the model to copy.
+
+   | Key | Required | Meaning |
+   | --- | -------- | ------- |
+   | `Name` | Yes | Display name, used as "`<Name>` setup complete." |
+   | `Actions` | Yes | Supported `-Action` values. Other actions are rejected before anything runs. |
+   | `Phases` | Yes | Ordered phases. Each has `File`, `Function`, and `Title`, plus optional `Parameters` (passed to the phase function) and `Steps` (run only these steps of a shared phase). |
+   | `MinimumOSVersion` | No | Oldest supported Windows version, checked before elevation. |
+   | `SetupNote` | No | Added to the opening line, for example the one restart or a large download. |
+   | `UninstallWarning` | No | Shown in yellow before cleanup starts. |
+   | `Notes` | No | Lines printed after the summary, such as a next step. |
+
+2. Reuse phases wherever possible. Install packages by name through the packages phase: add any new package to
+   the catalog in [`steps/packages.ps1`](./steps/packages.ps1) once, and every workload can list it. Pick
+   individual steps from a shared phase with `Steps`, as WinUI does for Developer Mode and the WinUI templates.
+   Only write a new phase file for work no phase covers, like [`steps/visual-studio.ps1`](./steps/visual-studio.ps1).
+3. Add a signed entry point at `src/Workloads/<name>/setup.ps1` by copying
+   [`Workloads/winui/setup.ps1`](../Workloads/winui/setup.ps1) and changing only `-Workload`.
+4. Test from a clone without signing: `.\src\windows-dev-config\dev-config.ps1 -AllowUnsigned -Workload <name>`.
+   After the sign cycle, point a short link such as `https://aka.ms/devconfig/<name>/setup.ps1` at the
+   repository-root `Workloads/<name>/setup.ps1`.
+
+The engine checks a workload in three stages, and any problem stops the run with a message:
+
+- When it loads the definition: unknown keys, malformed values, the action, and the minimum Windows version.
+- Before the first phase runs: phase files, functions defined in those files, and parameters, including
+  required parameters the workload doesn't set.
+- When a phase runs: package names and `Steps` names.

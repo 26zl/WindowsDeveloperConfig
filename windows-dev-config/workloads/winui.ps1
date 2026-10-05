@@ -1,82 +1,82 @@
 <#
 .SYNOPSIS
-  Scheduled-task plumbing so the flow can resume elevated after the WSL-required reboot.
+  WinUI 3: Developer Mode, .NET SDK 10, the Windows App Development CLI, Visual Studio
+  Community 2026 with the WinUI workloads, and the WinUI dotnet-new templates.
+
+.DESCRIPTION
+  Workload definition read by dev-config.ps1. It follows the Microsoft Learn WinUI onboarding
+  (https://learn.microsoft.com/windows/apps/get-started/start-here) and installs what
+  Workloads\winui\configuration.winget does, without needing winget configure. The phase
+  files under steps\ do the work.
 #>
+
+[CmdletBinding()]
+param(
+    [string] $Action = 'Full'
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Each workload has its own task so one workload's run never cancels another's pending resume.
-function Get-DevConfigResumeTaskName {
-    if ($Script:DevConfigWorkload -eq 'devconfig') {
-        return 'WindowsDevConfigResume'
-    }
-    return "WindowsDevConfigResume-$Script:DevConfigWorkload"
-}
+# Visual Studio 2026 supports Windows 11 and Windows Server 2019 or later.
+$isClient = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name 'InstallationType') -eq 'Client'
 
-function Clear-DevConfigResume {
-    # SilentlyContinue allows cleanup when no resume task is registered.
-    Unregister-ScheduledTask -TaskName (Get-DevConfigResumeTaskName) -Confirm:$false -ErrorAction SilentlyContinue
-}
-
-function Suspend-DevConfigForReboot {
-    param(
-        [Parameter(Mandatory)] [string] $ScriptPath
+@{
+    Name             = 'WinUI'
+    Actions          = @('Full')
+    MinimumOSVersion = if ($isClient) { '10.0.22000' } else { '10.0.17763' }
+    SetupNote        = 'Visual Studio is a multi-GB download'
+    Notes            = @(
+        'Open a new terminal so dotnet and winapp are on PATH.'
+        'Create an app with: dotnet new winui -n MyApp, or the WinUI Blank App (Packaged) template in Visual Studio.'
     )
-
-    $shell = Get-DevConfigTaskShellExe
-    # The limited task requires fresh UAC consent before any resumed code runs elevated.
-    $arguments = (Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed -AllowUnsigned:$Script:DevConfigAllowUnsigned -RequestElevation -Action $Script:DevConfigAction -Workload $Script:DevConfigWorkload) -join ' '
-    $action = New-ScheduledTaskAction -Execute $shell -Argument $arguments
-
-    # Scheduled task logon matching requires the DOMAIN\User or MACHINE\User account name.
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $trigger     = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
-    $principal   = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
-
-    # A short delay lets desktop and network initialization complete before package checks resume.
-    try {
-        $trigger.Delay = 'PT30S'
-    } catch {
-        Write-Verbose "Could not delay the resume trigger: $($_.Exception.Message)"
-    }
-
-    Clear-DevConfigResume
-    Save-DevConfigTally -Path (Get-DevConfigTallyPath -Directory (Split-Path -Path $ScriptPath -Parent)) `
-        -TerminalBackedUp $Script:DevConfigTerminalBackedUp
-    Register-ScheduledTask -TaskName (Get-DevConfigResumeTaskName) -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-
-    Write-Host ''
-    Write-Host 'WSL needs a restart to finish. Rebooting in 10s -- setup continues after you' -ForegroundColor Yellow
-    Write-Host 'log back in and accept one more UAC prompt. This is expected, not an error.' -ForegroundColor Yellow
-    Start-Sleep -Seconds 10
-
-    # The resume task is already registered, so a manual restart continues from the same point.
-    # shutdown.exe is used instead of Restart-Computer because the latter goes through WMI even
-    # for the local machine, and that call can time out and report failure mid-restart.
-    $shutdown = Join-Path $env:SystemRoot 'System32\shutdown.exe'
-    $result   = Invoke-DevConfigNativeCommand -FilePath $shutdown -Arguments @('/r', '/t', '0', '/f')
-
-    # 1115 means a restart is already under way, which is the outcome this wants either way.
-    if ($result.ExitCode -ne 0 -and $result.ExitCode -ne 1115) {
-        Write-Host ''
-        Write-Host "Windows would not let setup restart this machine (shutdown.exe returned $($result.ExitCode))." -ForegroundColor Yellow
-        Write-Host 'Restart when convenient -- setup carries on by itself once you log back in.' -ForegroundColor Yellow
-        # Keep the window open so the remaining manual restart instruction is visible.
-        Wait-DevConfigKeyPress
-        exit 0
-    }
-
-    # The restart request returns straight away, so pause before any fall-through code.
-    Start-Sleep -Seconds 60
-    exit 0
+    Phases           = @(
+        @{
+            File     = 'prerequisites.ps1'
+            Function = 'Invoke-PrerequisitesPhase'
+            Title    = 'Getting ready'
+        }
+        @{
+            File     = 'registry-system.ps1'
+            Function = 'Invoke-RegistrySystemPhase'
+            Title    = 'Developer Mode'
+            Steps    = @('DeveloperMode')
+        }
+        @{
+            File       = 'packages.ps1'
+            Function   = 'Invoke-PackagesPhase'
+            Title      = 'Packages'
+            # Visual Studio is last so the quick installs finish before its long download.
+            Parameters = @{ Packages = @('PowerShell', 'DotnetSdk', 'winappCli', 'VisualStudioCommunity') }
+        }
+        @{
+            File       = 'visual-studio.ps1'
+            Function   = 'Invoke-VisualStudioPhase'
+            Title      = 'Visual Studio workloads'
+            Parameters = @{
+                Components = @(
+                    'Microsoft.VisualStudio.Workload.ManagedDesktop'
+                    'Microsoft.VisualStudio.Workload.Universal'
+                    # .NET WinUI app development tools. The VS 2022 ID ComponentGroup.WindowsAppSDK.Cs is not in 18.x.
+                    'Microsoft.VisualStudio.Component.WindowsAppSdkSupport.CSharp'
+                )
+            }
+        }
+        @{
+            # The WinUI dotnet-new templates step is shared with Dev Config's GitHub Copilot phase.
+            File     = 'copilot.ps1'
+            Function = 'Invoke-CopilotPhase'
+            Title    = 'WinUI templates'
+            Steps    = @('WinUITemplates')
+        }
+    )
 }
 
 # SIG # Begin signature block
 # MIInRAYJKoZIhvcNAQcCoIInNTCCJzECAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCGhd82K3xUChEV
-# Is/Cd52A+9XppD6ds2COUrKGzKLMDqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD3zju79hR1C3y7
+# /gmbe+Ugumvblyx/vFfTW/93QNNxlaCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -148,62 +148,62 @@ function Suspend-DevConfigForReboot {
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIBcjMI2RrElXRGDWCm2DPxASvYn4eDTlRaQ5aV1x3WLvMEIG
+# KoZIhvcNAQkEMSIEICxLEQ2J8PMbn/vRgUgCdiK7Biv6Ve++W1UPlhdxndGEMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAEhgjFldrJoFC45O9
-# lewFKW+5lx2DA5PjfQrmZZTOiL1Ii2WEIH0RokUC2zMg50Xr2O1iKzwAhkFeZW7s
-# MlVZpWj1xW4VgIGsbJ7snc2wHMUEUhg0Pa8bQzxOh28qFTIrEIVCoqsrgVfdp+5Q
-# 08SWi+Qg4y4q4q0k0CCz8HOZGjqWADjJKtJPgZpn9hHzFIdZxwyqODTWTBJgUCEO
-# xADOhg1Id1ULxxBPL83whUlXwUkwZ7UNG4s6DmCQPkgqeh44UT8PynxoUYWUQypd
-# 2ZKgAiQHOufODJIcI4M/wzTlfidEUTRFs+4Z7cltpMx2TJ/9a3QD7OPaPfUsmDRT
-# ZUV2vqGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAJppgaAx7Qn0avTt7
+# 0VK6b2gBTLE/aT38T2glM8QyeMr2e2imKE1lrQdQoOKxkDpm5stAwUhrddu0BtVS
+# fR1sCQ84K6SK1EfLkIOEISqUA6j0CDzd1LiROVu+GtgQlK5XVqqD9ymFlJzlnNK9
+# O0fZR8fwYpS0WzFDyLYVJG+hfOXx8QQBpCifAnE1wCZw6WXJNv4yJsjewq6dUFAR
+# qqoTWS2T3gW/bxuywnDY4rsdH6dWBBAvJ6MMki4wUzeRKvQxH3d1aONfNl4SKVp+
+# dYooZ90kd9zXk73kMpxoaGG+UA1moS9T05t+jH6Yr5Cb7kHpp/BeHpNJQPfoyZpX
+# nkbMtqGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
 # gheFAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCBsHoWTvmq3IN1Z
-# jrP2PVo+JxLZgVqun0EdOcWVShYjpAIGaq4418IhGBMyMDI2MTAwNDIzMDY0Ni41
-# NzFaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCB11LgzvQRhfGAx
+# kcmsc1f/JFcTg04GW/dEn3ALrXBlfAIGaq6wVNbXGBMyMDI2MTAwNDIzMDY0OS41
+# MjdaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MDFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaCCEf4wggcoMIIF
-# EKADAgECAhMzAAACGV6y2FR19LGNAAEAAAIZMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
+# EKADAgECAhMzAAACHUvAkoc4hX45AAEAAAIdMA0GCSqGSIb3DQEBCwUAMHwxCzAJ
 # BgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25k
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jv
-# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgyNloXDTI2MTEx
-# MzE4NDgyNlowgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
+# c29mdCBUaW1lLVN0YW1wIFBDQSAyMDEwMB4XDTI1MDgxNDE4NDgzM1oXDTI2MTEx
+# MzE4NDgzM1owgdMxCzAJBgNVBAYTAlVTMRMwEQYDVQQIEwpXYXNoaW5ndG9uMRAw
 # DgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # LTArBgNVBAsTJE1pY3Jvc29mdCBJcmVsYW5kIE9wZXJhdGlvbnMgTGltaXRlZDEn
-# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjQwMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
+# MCUGA1UECxMeblNoaWVsZCBUU1MgRVNOOjQzMUEtMDVFMC1EOTQ3MSUwIwYDVQQD
 # ExxNaWNyb3NvZnQgVGltZS1TdGFtcCBTZXJ2aWNlMIICIjANBgkqhkiG9w0BAQEF
-# AAOCAg8AMIICCgKCAgEApqFIyUkzIyxpL3Q03WmLuy4G9YIUScznhKr+cHOT+/u7
-# ParxI96gxxb1WrWuAxB8qjGLfsbImx8V3ouK1nUcf+R/nsnXas5/iTgV/Tl3QTRG
-# T0DeuXBNbpHqc+wC1NiTyA76gLnirvSBEoBzlrpNQFEnuwdbPLCLpTS3KWSCu5J0
-# 2b+RFWR/kcFzVxnhoE3gIaeURtrGKGBZGKLBXvqggkDENtKkvtvRT32xLvAvL/Rp
-# Reu5z18ZojCs72ZSoa74Dy8YbaWsDm3OZOpJRZxZsPKCHZ6xNqgFKf0xNHj0t9v0
-# Q3W+2z5gAVaasJJCvR52Sl0XJ2AOf3l0LSetXgUA5gD5IQ1RvEslTmNnSouTrGID
-# 3D1njY7mBu0puiIdPK2jK/1Weef2+YR4cQpWQkeBZmXidh9AuWdlwxKQL15LJ6K2
-# dw8y/t/PBhmLyt6QAf0CepWRdgZnMytVAUuWHwlZRV9JLY7aX8D55eL9+cOLpX3b
-# GNOmN24UpIW8qtZaqXaesFvIOW23JNLhaaQVvObr1eu7GE/5Mn43e+/DbtdYl/bL
-# P2IQ1xYEJdSbcUkDFfW3KlZEh+nBKDtaRnNRkbgIgxIbKdT38OKQwZ/aA4uSsiAg
-# 6nEPiWBHGuytIo5wU75M5VdjhEqqTHfXYu8BJi6GTzvWT+9ekfMXezqCkksxaG8C
-# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBSAaOo5HWatNzqZn1IF1fcD6nr3ITAfBgNV
+# AAOCAg8AMIICCgKCAgEAorSgaAA8oOl4ph574zw29egUN8DDepRHLX8FM1zHNJmX
+# G6KrSqUKwzcKafopuYdPTETTCvb9aJfESuAU0iGNUFI/D6R0kvdfpe2oPX+E3sbT
+# QvGi4JPH5qdIYUaJ45V/4bqe8eNvbWzpC+ZKjH193DeiI1XAI918JoQmBhlEXo/T
+# on1721luZJgincsf5LjMY3jX84WyXUSX3dsS7h/7xVI+w1yjg7pa+0y3o/me2Tsv
+# 6UJUdSTQap5ORGSfCnclnP1z3IiiWIWr3Vo7aIPWsgJzq3m5GxpxUHCQk8qzUhk5
+# 0y/uB+LGE3WIK2C77iy9iFsSfSLUnyMEzGRDW9mXHT4PH7Ozz6CHqQEiNvwcHqlv
+# lCh1pHQh1NXQSAqOoVBs5mi6easf6yxWTfe5DrR79503r8pU6VqC2Y9XMRU4wH9Q
+# bYXYsIUZ33Jmndy22W1LBDAbxBPQHCBlncGDU3BgdhVUVLe80mggFO98FdkWho67
+# w4kPdCTRkvdvkY8PrQYE/nQjHXCa0g7LcMttZb6ejMHfQ+tUWXv6+nZ4Ynkr2Oka
+# xclFCw4RIYNMWD26AWbQj/WEdzga18fKtw66L5gzXPza6jFBfPJeKE3H8QAuwpir
+# mH4ms+5nUjNNQOmNgqJn0U1+3Yn7ClswD79YN0r3fdbYBMDApBZJpNlK7q7HXRsC
+# AwEAAaOCAUkwggFFMB0GA1UdDgQWBBSEWfBxNEamZtXm8gl92Yq80jfxXTAfBgNV
 # HSMEGDAWgBSfpxVdAF5iXYP05dJlpxtTNRnpcjBfBgNVHR8EWDBWMFSgUqBQhk5o
 # dHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NybC9NaWNyb3NvZnQlMjBU
 # aW1lLVN0YW1wJTIwUENBJTIwMjAxMCgxKS5jcmwwbAYIKwYBBQUHAQEEYDBeMFwG
 # CCsGAQUFBzAChlBodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20vcGtpb3BzL2NlcnRz
 # L01pY3Jvc29mdCUyMFRpbWUtU3RhbXAlMjBQQ0ElMjAyMDEwKDEpLmNydDAMBgNV
 # HRMBAf8EAjAAMBYGA1UdJQEB/wQMMAoGCCsGAQUFBwMIMA4GA1UdDwEB/wQEAwIH
-# gDANBgkqhkiG9w0BAQsFAAOCAgEAXxzVZLLXBFfoCCCTiY7MHXdb7civJSTfrHYJ
-# C5Ok2NN75NpzTMT9V2TcIQjfQ3AFUbh1NBAYtMUuwxC6D4ceEXG5lXAnbvkC9Yje
-# LVDRyImXYYmft7z+Qpl9t3C/8a0tiqnOz8Ue8/DYLtMTgvWMnsqLNjILDaImOfnH
-# I36TLCjGFe8RYLXGdCUdOLlfAdMGePxSTA3TAAOc+GQbmPWjrguLWbxvnl3NVjRv
-# rBZVkxFMoVZH0f7qGwDOShjpnv5nYnQ48ufL0uBz52RbPGdX4Fv9+UGOrBprmcHz
-# mIutFtJec2Y4kujNtTK2wBGgWscEOVhFiaVdje8VLJ7MVNKE5TmsuGM3jTLr1nuR
-# 5AFGs3UKkP7g3cQD4cHK7XdLiTm7e606QJ+WqeQsADYE9dvU9wIUbI9Dl4UcIErF
-# w+FHaWSTrkfJ4SvLmhKnl5khhpJ1sF3z6e1BxepUliXHqzRLiHWihWIWESF8IHEl
-# F3POxbP4VJqHBiYvaXMV0SyRgwoD6zXddbUnX9WR6JL2BlqAjjHxINwelsp/VhxA
-# WThzuMA58LxvE/VAzjfFF4Wm7a1ZALmJVw3oL/s/uxo1Op4tcT+hfZ9uN1htC1JN
-# 4DuRqFfLttjuoAmUQobO5zUFRzvCn8Ck/hiO+bzR15sqkjlxLMyMjpkc/ef4SUUi
-# kD468vUwggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
+# gDANBgkqhkiG9w0BAQsFAAOCAgEAkdweB4yxvLspLKq0D+miyD4Q0EcxVFpNZuJx
+# iR54gWRkeTDDuymNeB03JhlsBpbwSYJ5uZSgDBCvwHED2VL8lJpFlOprJzxsXWC2
+# NTfA+O+PO5Fk5jw6LHh6jeBADDEdQAx3Hqi7Zm0JwvQ93z5f6dtxkm29WqOcHYXR
+# XfAQwy1hSrLXyfeblqR66jpP/9n0fCkWU4ggsUjQpQ2Ngj1DV09J4Y3y7p9Nd81+
+# Xs6qYo++7RKm8qiB/5NDeigOLjlAeFgiEXIRUJW+mJyqpQw+OORlaqcFjR8Hu0G+
+# /7bMdek68YX+kPpDBk7Ue+I/xgiYJ1xcDRBn/vczLtN72+RIlD4UgXYLuBSCk//p
+# DEPX5z39Cr+rkc6E4Y28FPk4BhloAyvp628P4xfElQY8TcxraUbZShypocE6ny95
+# D1K1BkltZmrHVKCxmglnuOlM15NKIrXFlXCzdqpCtIwQ417wNAVF/QDPvzzbumPd
+# Ti6fb0tLbScYobV6zvbBsMsKEME4Tj1b9oIXC8dybJq4nbboEXYpRwi1QAbpSNrn
+# +PxGW9uf1q63FnMJu4gm3Oh63njW/iVf723quzyHrSijWMgY0HiRiHQi0Jyu0h8M
+# dhRUp7mxbmLQckPiOFwAlIaUN/k725y/aLWpkRU6fqmLlEOyH5WpyLd23AYy9r8v
+# +Qoba6swggdxMIIFWaADAgECAhMzAAAAFcXna54Cm0mZAAAAAAAVMA0GCSqGSIb3
 # DQEBCwUAMIGIMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4G
 # A1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMTIw
 # MAYDVQQDEylNaWNyb3NvZnQgUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAx
@@ -246,41 +246,41 @@ function Suspend-DevConfigForReboot {
 # AkECAQEwggEBoYHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
-# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MDFBLTA1RTAtRDk0NzEl
+# bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MzFBLTA1RTAtRDk0NzEl
 # MCMGA1UEAxMcTWljcm9zb2Z0IFRpbWUtU3RhbXAgU2VydmljZaIjCgEBMAcGBSsO
-# AwIaAxUAMXYp/Wqqdyb0enigrLfxl0InAz6ggYMwgYCkfjB8MQswCQYDVQQGEwJV
+# AwIaAxUAuoO+BKbfXzqyfi9GLEdWHkCLeT+ggYMwgYCkfjB8MQswCQYDVQQGEwJV
 # UzETMBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UE
 # ChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGlt
-# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5tJPUwIhgPMjAyNjEw
-# MDQxOTE4MTNaGA8yMDI2MTAwNTE5MTgxM1owdzA9BgorBgEEAYRZCgQBMS8wLTAK
-# AgUA7m0k9QIBADAKAgEAAgIXZQIB/zAHAgEAAgIUAzAKAgUA7m52dQIBADA2Bgor
+# ZS1TdGFtcCBQQ0EgMjAxMDANBgkqhkiG9w0BAQsFAAIFAO5s87UwIhgPMjAyNjEw
+# MDQxNTQ4MDVaGA8yMDI2MTAwNTE1NDgwNVowdzA9BgorBgEEAYRZCgQBMS8wLTAK
+# AgUA7mzztQIBADAKAgEAAgIlxgIB/zAHAgEAAgISMjAKAgUA7m5FNQIBADA2Bgor
 # BgEEAYRZCgQCMSgwJjAMBgorBgEEAYRZCgMCoAowCAIBAAIDB6EgoQowCAIBAAID
-# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQA7oGHKQhDxB9/QL6EULmmc4sYClf6BRs0P
-# KcxZ5Y+yQPB9NMpb047oq/9Rzspw2O2HNw07C8e3F/WqnIwclbMPF42Q1cKRteXX
-# nhYcSzy7sHJZTEirapfWuYYUmegTukVJP5YH3QmCD0Y1zmFXAyMl4WuuDs5+AsE2
-# OHKvWCnrx4UqBjarcOn/boN0jxG2oQ+GYPLkqpvGtpvvd/REwJEYDJMQJjeXoBxZ
-# C2FUSTTgW3jncYP2Xm3At+tTJknk6DdoKJVoYgkuGaRICamm3tgsmn4EakaVwRWi
-# Zmeee7pQkErNg0H0gj6KGfwdO/hiAetNmpUHUh1f8m+qtIXbEdjYMYIEDTCCBAkC
+# AYagMA0GCSqGSIb3DQEBCwUAA4IBAQCJWRiockCE3Lpqs4fatmZf08KiNAPQ47P8
+# doxaINZNm/9mg7fp9Mi1va8ZhQrPnjqodSlS4tAMx62iCBVVzmT8+1o4oxp0QBsZ
+# /C7vkUOmpSclWg3MccVL5P4JvptPI8tqwzZJ534AsOoc9sT5X2z+YVf0KGDCufa4
+# aUAKkJDA5u/xaOEjJBxvQBVYucyeyepqW+aT3h+yZ6DSIae0berg20mBu8T9198E
+# Mpqevnbp/aTOFQ6RpQavqiMHJxaJIOijaVfzJ9zPVxyfissul1v0C0UHKaLbXFee
+# QnbzcbErB89QznOqv8MLnpDdS5bWXG13LKvUiZbbx+1iNLk45nU2MYIEDTCCBAkC
 # AQEwgZMwfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNV
 # BAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQG
-# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIZXrLYVHX0
-# sY0AAQAAAhkwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
-# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQghFov1eu3Pjo3z9Jn0S54vol4cKpDx9IY
-# 3DD62nVIVeEwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCDckX633E1y1EF3
-# 2V18zQcrsgjzI9+3Le7mlvk2OebthjCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
+# A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIdS8CShziF
+# fjkAAQAAAh0wDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
+# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgzgSRWCO+9S6rcSFbAaKteNnkKIjpIVsa
+# zaHQup6HfTAwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCCxtpXMXEiLJzrq
+# M77ep4rTNwrMOj6gpWN9hZvpj5QFUTCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
 # EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
 # aWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0
-# YW1wIFBDQSAyMDEwAhMzAAACGV6y2FR19LGNAAEAAAIZMCIEIKVKj3q6lSulWnzs
-# eky5B+ecjA6VlLIIpGMRxJKO9ax9MA0GCSqGSIb3DQEBCwUABIICAI5UAIOksNMK
-# 2QKPjwRTtow87hvfRNDT03m00Mh45R6Q04hxnDV26GSODtSVFQ+7nF3q+iA1+v6f
-# YL7SPSTvMIEkHFnAx02IV1KcOq0A3Rq4k9WSHjF6e41/3zXxOWFHRRQSw2H+vAPX
-# I4wG7sUowpKe0MgBbFc/CKU/XwWr+dVO03uj8Na45UHAAn+LQdKkAZvyPJXiyqDr
-# xpCZsy/k/RG9nNM5cRJt2wFC+m7Ei9JM3msBtGLN5UAE3T/iVlMJFaWfMwidiG5+
-# L9yrSvaPD0dlMcUKrPzTsuU0tR/PpKlZ7Ax8UfrfSw6dz8R/iYhbtHbG81oCtJic
-# O9+FEhunsJnADaHV4C1rKH59SH/ToQOe/fZkSHgphWAyoSvIVl+omKD2TNsDv+1S
-# bs1SnYwI/SYRGhATOAzZW9/fwGNOB8yPH7vrfnK1Y0zYGyaygSzpDdIfsKbZDowB
-# +YAruTScNWi1aQXpN5c7M+syIoBLip88gfsddNwI1JFBGCqXwWieKgqrJ+5M5cvX
-# sH6nTQjWZygLUojSHl6Dc7VrfWvNdgYpfM/ZXt1KI5GMBKw6SPxCLnGn6l1dmaje
-# 9tay/JmRSASpnO9Q2MtoigfqHsAVqkIqwGpFOJVBCXsmWzLAGphakMQ9YqcJCkj2
-# i7oStqGTCrHMK1YdptWheX6QuDlPzCGw
+# YW1wIFBDQSAyMDEwAhMzAAACHUvAkoc4hX45AAEAAAIdMCIEIFtJRITgcnmC5WAB
+# XLvB1F0lmx/uIDnN7aNGyjDz/AiYMA0GCSqGSIb3DQEBCwUABIICAGSU3U1A/Kz1
+# RKg9T2nMhydVaq9MVY/YwLRci5rDpeDjgQsAw1kMgXbqnu12EFBsAMSoVa++xKVZ
+# pkbZr5nmAoJ3FVYEIRRr8FyRfnrVQf+i3rDbmDNj4pMbrcvbUsws0IfooKm6OsyU
+# jPXFwlosfkNZ1UPdr9D3sCJWl86pAn55T69c5WepJV3YbZLv5ZNJok0BXg+R4QU9
+# CHHB+1qcHKZUj2DrWDVmjenkVQ8OE+DK2hJgI38ndhxT2ak8bzYiaUluFVoSYPaY
+# 0gqVbZCv3IHsowDm8b5p4JRxTTDWgyfovJbzyxXNIVNwSOGaloJSDgraBJzdfH0b
+# hyfNxXYdMfTyDosD8NIx4+z1Be+xfNwk/jgfIN0tlH6ZVtoo5ItEnOrFqGteEK/k
+# TNFu8vpTn6eKyC6poTYixSserBJQSC7te8+ZQ3te1aR8Jum+3CS/i/kXFv6DPt84
+# EoA1CuXpPQuQIaCvp+MEkCtbuwrh7omhvkGybrGEeArMJd4zvfne+sthoHu3Vec9
+# ERnyRmylGzRT4ykMxFStFnmqwB2xVAKUg7ebVOqYSbkTupsN7kURo3KLTlb9x/Zo
+# TdiOOhUIFLIO28g7/1Z1MJ1tribpYytejwfGVGEXsCPdq8IO2NZCb7okAnnTqdEn
+# I0YRj9xsaK4sp+Iw+RMpsSZFpZYO2C+Q
 # SIG # End signature block

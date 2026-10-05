@@ -47,7 +47,12 @@ function Invoke-DevConfigNativeCommand {
             }
             Start-Sleep -Milliseconds 500
         }
-        return $pipeline.EndInvoke($pending)
+        $result = $pipeline.EndInvoke($pending)
+        # A command that cannot start fails inside the runspace, not here; surface it like the in-process path does.
+        if ($pipeline.Streams.Error.Count -gt 0) {
+            throw $pipeline.Streams.Error[0].Exception
+        }
+        return $result
     } finally {
         $pipeline.Dispose()
     }
@@ -68,7 +73,7 @@ function Invoke-DevConfigCleanupCommand {
         Invoke-DevConfigNativeCommand -FilePath $command.Source -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
     }
     if ($null -eq $result.ExitCode -or $result.ExitCode -notin $SuccessCodes) {
-        throw "$FilePath $($Arguments -join ' ') failed ($($result.ExitCode)): $($result.Output.Trim())"
+        throw "$FilePath $($Arguments -join ' ') failed ($($result.ExitCode)): $(([string]$result.Output).Trim())"
     }
     return $result
 }
@@ -81,13 +86,15 @@ function Invoke-DevConfigProcess {
         [Parameter(Mandatory)] [int] $TimeoutSeconds,
         [switch] $NoNewWindow,
         [string] $RedirectStandardOutput,
-        [string] $RedirectStandardError
+        [string] $RedirectStandardError,
+        [string] $RedirectStandardInput
     )
     $start = @{ FilePath = $FilePath; PassThru = $true }
     if ($Arguments.Count)         { $start.ArgumentList           = $Arguments }
     if ($NoNewWindow)             { $start.NoNewWindow            = $true }
     if ($RedirectStandardOutput)  { $start.RedirectStandardOutput = $RedirectStandardOutput }
     if ($RedirectStandardError)   { $start.RedirectStandardError  = $RedirectStandardError }
+    if ($RedirectStandardInput)   { $start.RedirectStandardInput  = $RedirectStandardInput }
 
     $process   = Start-Process @start
     # Cache the process handle before exit so Windows PowerShell can still report ExitCode.

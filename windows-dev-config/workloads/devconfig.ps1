@@ -1,244 +1,136 @@
 <#
 .SYNOPSIS
-  Configures or cleans up a Windows developer workstation, or applies one developer workload.
+  Windows Dev Config: developer tools, Windows settings, fonts, Terminal, and WSL + Ubuntu.
 
 .DESCRIPTION
-  -Workload picks a definition from workloads\. The default, devconfig, is the complete
-  Windows Dev Config setup; other workloads, such as winui, reuse the same phases, helpers,
-  elevation, logging, and summary.
+  Workload definition read by dev-config.ps1. It only lists phases; the phase files under
+  steps\ do the work. This is the default workload behind setup-full.ps1,
+  setup-standard.ps1 (Partial), and uninstall.ps1.
 #>
 
 [CmdletBinding()]
 param(
-    [switch] $NoElevate,
-    [switch] $Resumed,
-    [switch] $AllowUnsigned,
-    [switch] $ApplyTerminalFont,
-    [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full',
-    [ValidatePattern('^[a-z0-9]+(-[a-z0-9]+)*$')] [string] $Workload = 'devconfig'
+    [string] $Action = 'Full'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# A child shell can inherit incompatible built-in modules from another PowerShell edition.
-$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
-
-$stepsDir = Join-Path $PSScriptRoot 'steps'
-$securityCode = [IO.File]::ReadAllText((Join-Path $stepsDir '_security.ps1'))
-if (-not $AllowUnsigned) {
-    # Verify and execute the same text to avoid a file-swap race.
-    $signature = Get-AuthenticodeSignature -Content ([Text.Encoding]::Unicode.GetBytes($securityCode)) -SourcePathOrExtension '.ps1'
-    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
-        throw 'The setup security helper failed Microsoft signature verification. Run bootstrap.ps1 to reinstall; use -AllowUnsigned only for development.'
+# WSL stays last so its required reboot happens after other phases.
+$phases = @(
+    @{
+        File     = 'prerequisites.ps1'
+        Function = 'Invoke-PrerequisitesPhase'
+        Title    = 'Getting ready'
     }
-}
-. ([scriptblock]::Create($securityCode))
-if (-not $AllowUnsigned) {
-    Assert-DevConfigProtectedTree -Directory $PSScriptRoot
-    Assert-DevConfigMicrosoftSigned -Directory $PSScriptRoot
-}
-
-# Windows PowerShell 5.1 defaults to ANSI; force UTF-8 for console symbols.
-try {
-    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    [Console]::OutputEncoding = $utf8NoBom
-    $OutputEncoding           = $utf8NoBom
-} catch {
-    Write-Verbose "Could not force UTF-8 console encoding: $($_.Exception.Message)"
-}
-
-. (Join-Path $stepsDir '_console.ps1')
-. (Join-Path $stepsDir '_step-runner.ps1')
-. (Join-Path $stepsDir '_elevation.ps1')
-. (Join-Path $stepsDir '_reboot-resume.ps1')
-. (Join-Path $stepsDir '_registry.ps1')
-. (Join-Path $stepsDir '_environment.ps1')
-. (Join-Path $stepsDir '_retry.ps1')
-. (Join-Path $stepsDir '_terminal.ps1')
-. (Join-Path $stepsDir '_winget.ps1')
-. (Join-Path $stepsDir '_pwsh-bootstrap.ps1')
-. (Join-Path $stepsDir '_workload.ps1')
-
-$Script:DevConfigAllowUnsigned = [bool]$AllowUnsigned
-if ($ApplyTerminalFont) {
-    . (Join-Path $stepsDir 'fonts.ps1')
-    $pendingPath = Get-DevConfigPendingTerminalFontPath
-    if (-not (Test-Path -LiteralPath $pendingPath)) {
-        Write-Host 'No Terminal font update is pending.'
-        exit 0
-    }
-    $logPath = [IO.Path]::ChangeExtension($pendingPath, '.log')
-    Start-DevConfigLog -Path $logPath
-    $failure = $null
-    try {
-        Invoke-DevConfigPendingTerminalFont
-    } catch {
-        $failure = $_
-        Write-Host "The Terminal font update failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Full log: $logPath" -ForegroundColor DarkGray
-    } finally {
-        Stop-DevConfigLog
-    }
-    if ($failure) {
-        Wait-DevConfigKeyPress -TimeoutSeconds 60
-        exit 1
-    }
-    exit 0
-}
-
-# The workload decides which phases run; everything else in this script is shared by every workload.
-$Workload = $Workload.ToLowerInvariant()
-$Script:DevConfigWorkload = $Workload
-try {
-    $definition = Get-DevConfigWorkload -Directory (Join-Path $PSScriptRoot 'workloads') -Workload $Workload -Action $Action
-} catch {
-    # Pause so the reason stays readable when this runs in a window that closes on exit.
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    Wait-DevConfigKeyPress
-    exit 1
-}
-$workloadName = $definition['Name']
-
-# TLS is configured before any download step runs.
-Enable-DevConfigModernTls
-
-Invoke-DevConfigElevate -ScriptPath $PSCommandPath -NoElevate:$NoElevate -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action -Workload $Workload
-
-if ($Action -eq 'Uninstall') {
-    Invoke-DevConfigEnsureCleanupShell -ScriptPath $PSCommandPath -AllowUnsigned:$AllowUnsigned -Workload $Workload
-} else {
-    # WinGet module behavior is more consistent in PowerShell 7 than in Windows PowerShell 5.1.
-    Invoke-DevConfigEnsurePwsh -ScriptPath $PSCommandPath -Resumed:$Resumed -AllowUnsigned:$AllowUnsigned -Action $Action -Workload $Workload
-}
-
-# The lock starts after relaunches so the worker process owns the log file.
-# Workloads share one lock because they install through the same WinGet and registry paths.
-if (-not (Enter-DevConfigSingleInstance)) {
-    Write-Host ''
-    Write-Host 'Setup is already running in another window.' -ForegroundColor Yellow
-    Write-Host 'Switch to it rather than starting a second copy -- they would fight over the same installs.' -ForegroundColor DarkGray
-    Wait-DevConfigKeyPress
-    exit 1
-}
-
-Start-DevConfigLog -Path (Join-Path $PSScriptRoot "$Workload-log.txt") -Append:$Resumed
-
-# Any prior resume task for this workload is stale once this run starts.
-Clear-DevConfigResume
-
-$Script:DevConfigResumed = [bool]$Resumed -and $Action -ne 'Uninstall'
-$Script:DevConfigAction = $Action
-if ($Script:DevConfigResumed) {
-    # Restore the pre-reboot tally so the final summary covers the whole run.
-    Restore-DevConfigTally -Path (Get-DevConfigTallyPath -Directory $PSScriptRoot)
-}
-$phases = @($definition['Phases'])
-
-$operation = if ($Action -eq 'Uninstall') { 'cleanup' } else { 'setup' }
-Write-Host ''
-if ($Action -eq 'Uninstall') {
-    Write-Host "$workloadName cleanup -- resetting settings and removing developer tools" -ForegroundColor Cyan
-    if ($definition['UninstallWarning']) {
-        Write-Host $definition['UninstallWarning'] -ForegroundColor Yellow
-    }
-    Write-Host 'Some uninstallers may request Administrator approval.' -ForegroundColor DarkGray
-} elseif ($Script:DevConfigResumed) {
-    Write-Host "Welcome back. Resuming $workloadName setup ($Action) after the reboot..." -ForegroundColor Cyan
-} else {
-    $setupNote = if ($definition['SetupNote']) { ", $($definition['SetupNote'])" } else { '' }
-    Write-Host "$workloadName setup ($Action) -- $($phases.Count) phases$setupNote" -ForegroundColor Cyan
-}
-
-$failure = $null
-try {
-    # Load phase files and check function and parameter names before running any phase.
-    foreach ($phase in $phases) {
-        $path = Join-Path $stepsDir $phase.File
-        if (-not (Test-Path -LiteralPath $path)) {
-            $rerun = "bootstrap.ps1 -Action $Action"
-            if ($Workload -ne 'devconfig') { $rerun += " -Workload $Workload" }
-            throw "The $operation script is missing: $path. Run $rerun to reinstall it."
+    @{
+        File       = 'packages.ps1'
+        Function   = 'Invoke-PackagesPhase'
+        Title      = 'Packages'
+        Uninstall  = $true
+        # Install order; names refer to the package catalog in steps\packages.ps1.
+        Parameters = @{
+            Packages = @(
+                'Terminal'
+                'IntelligentTerminal'
+                'PowerShell'
+                'Git'
+                'GitHubCLI'
+                'AzureCLI'
+                'GitHubCopilot'
+                'VSCode'
+                'DotnetSdk'
+                'Python'
+                'VCRedist'
+                'UV'
+                'NodeJS'
+                'nvmForNode'
+                'Coreutils'
+                'OhMyPosh'
+                'winappCli'
+                'PowerToys'
+            )
         }
-        . $path
-        $null = Resolve-DevConfigWorkloadPhase -Phase $phase -OrchestratorPath $PSCommandPath
     }
-
-    $phaseIndex = 0
-    foreach ($phase in $phases) {
-        $phaseIndex++
-
-        # Script-scoped phase metadata avoids passing header state through every phase file.
-        $Script:DevConfigPhaseIndex       = $phaseIndex
-        $Script:DevConfigPhaseTotal       = $phases.Count
-        $Script:DevConfigPhaseTitle       = $phase.Title
-        $Script:DevConfigPhaseHeaderShown = $false
-
-        Invoke-DevConfigWorkloadPhase -Phase $phase -OrchestratorPath $PSCommandPath
-
-        # New tool locations are visible in this process only after PATH is refreshed.
-        Update-DevConfigSessionPath
+    @{
+        File      = 'registry-system.ps1'
+        Function  = 'Invoke-RegistrySystemPhase'
+        Title     = 'System settings'
+        Uninstall = $true
     }
-
-    Show-DevConfigSilentSkipSummary
-    Write-Host ''
-    Write-Host "$workloadName $operation complete." -ForegroundColor Green
-    $tally = $Script:DevConfigTally
-    $summaryParts = @("$($tally.Done) changed", "$($tally.AlreadyOk) already up to date")
-    if ($tally.Warned -gt 0) {
-        $summaryParts += "$($tally.Warned) flagged"
+    @{
+        File      = 'registry-explorer.ps1'
+        Function  = 'Invoke-RegistryExplorerPhase'
+        Title     = 'File Explorer tweaks'
+        Uninstall = $true
     }
-    Write-Host "  $($summaryParts -join ', ')" -ForegroundColor DarkGray
-    # Names are shown because the detailed flags may have scrolled off screen.
-    if ($tally.Warned -gt 0) {
-        Write-Host "  Flagged: $($Script:DevConfigWarnedSteps -join ', ')" -ForegroundColor Yellow
-        Write-Host '  These were skipped or could not be confirmed. Running this again retries just those.' -ForegroundColor DarkGray
+    @{
+        File      = 'registry-taskbar-search.ps1'
+        Function  = 'Invoke-RegistryTaskbarSearchPhase'
+        Title     = 'Taskbar, search & start tweaks'
+        Uninstall = $true
     }
-    # Notes raised by steps come before the workload's standing notes.
-    foreach ($note in $Script:DevConfigNotes) {
-        $color = if ($note.Warning) { 'Yellow' } else { 'DarkGray' }
-        Write-Host "  $($note.Message)" -ForegroundColor $color
+    @{
+        File      = 'edge.ps1'
+        Function  = 'Invoke-EdgePhase'
+        Title     = 'Microsoft Edge tweaks'
+        Uninstall = $true
     }
-    foreach ($note in @($definition['Notes'] | Where-Object { $_ })) {
-        Write-Host "  $note" -ForegroundColor DarkGray
+    @{
+        File     = 'fonts.ps1'
+        Function = 'Invoke-FontsPhase'
+        Title    = 'Fonts'
     }
-} catch {
-    $failure = $_
+    @{
+        File      = 'terminal.ps1'
+        Function  = 'Invoke-TerminalPhase'
+        Title     = 'Windows Terminal'
+        Uninstall = $true
+    }
+    @{
+        File      = 'powershell-profile.ps1'
+        Function  = 'Invoke-PowerShellProfilePhase'
+        Title     = 'PowerShell profile'
+        Uninstall = $true
+    }
+    @{
+        File      = 'copilot.ps1'
+        Function  = 'Invoke-CopilotPhase'
+        Title     = 'GitHub Copilot'
+        Uninstall = $true
+    }
+    @{
+        File      = 'wsl.ps1'
+        Function  = 'Invoke-WslPhase'
+        Title     = 'WSL + Ubuntu'
+        Uninstall = $true
+    }
+)
+if ($Action -eq 'Partial') {
+    $phases = @($phases | Where-Object { $_.File -ne 'edge.ps1' })
+    ($phases | Where-Object { $_.File -eq 'registry-taskbar-search.ps1' }).Title = 'Taskbar & Start tweaks'
+} elseif ($Action -eq 'Uninstall') {
+    $phases = @($phases | Where-Object { $_['Uninstall'] })
+    # Reset Terminal after removing the tools and WSL fragments that can recreate profiles.
+    $phases = @($phases | Where-Object { $_.File -notin @('packages.ps1', 'terminal.ps1') }) +
+        @($phases | Where-Object { $_.File -eq 'packages.ps1' }) +
+        @($phases | Where-Object { $_.File -eq 'terminal.ps1' })
 }
 
-if ($failure) {
-    Write-Host ''
-    Write-Host "$workloadName $operation stopped early." -ForegroundColor Red
-    Write-Host "  $($failure.Exception.Message)" -ForegroundColor Red
-    $origin = $failure.InvocationInfo
-    if ($origin -and $origin.ScriptName) {
-        Write-Host "  ($(Split-Path -Leaf $origin.ScriptName) line $($origin.ScriptLineNumber))" -ForegroundColor DarkGray
-    }
-    Write-Host '  Nothing already applied was undone -- running this again picks up where it left off.' -ForegroundColor DarkGray
-}
-
-$logPath = Get-DevConfigLogPath
-if ($logPath) {
-    Write-Host "  Full log: $logPath" -ForegroundColor DarkGray
-}
-
-# Close the log before releasing the lock so another run can start while this window waits.
-Stop-DevConfigLog
-Exit-DevConfigSingleInstance
-
-# The elevated window owns the final pause on both the initial and resumed runs.
-Wait-DevConfigKeyPress
-
-if ($failure) {
-    exit 1
+@{
+    Name             = 'Calm OS'
+    Actions          = @('Full', 'Partial', 'Uninstall')
+    SetupNote        = 'one reboot expected along the way'
+    UninstallWarning = 'Ubuntu and its files will be deleted. Targeted tools are removed even if they predate setup.'
+    Notes            = @('A few Explorer and taskbar changes appear once you sign out and back in.')
+    Phases           = $phases
 }
 
 # SIG # Begin signature block
 # MIInKAYJKoZIhvcNAQcCoIInGTCCJxUCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCX91eeDvw7kLr+
-# gCjsjvvXvWpBaa/IJiA56JwA65YTQKCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBPCvhr2A2cz3z7
+# fkzCXnI0gxoVSev9B5yNDKuwO1hjMqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -310,19 +202,19 @@ if ($failure) {
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIHJskenK3bEIP1B6SY+gqkSgiW/TqJcgZRej/9662vH7MEIG
+# KoZIhvcNAQkEMSIEINBrw8FA5qEWx8yXQaImdpHQySpi8MbNSdFU+5a/QhHPMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAg/LPQ6RGqdBnnqHN
-# NPNpM16ggEIWf053Q+ntnyzLMJf9iNrtKd+CydCJfejVzc/Uf1kkOxHtbiYTxNPx
-# v9h35RkUivWIDPIACTINoKoVHXFxC49xvjVAuDzd8bPu8wTJxEATAzTGVOCo9I6C
-# CAZXUNP5xIvp+md+03pHMT3odf88w7kcDHS8QlR53B1hcIy6mF35Y6UH2O4g5Rh5
-# t+0Rf7HUVfOTtf480SBS+2JXm+DzgGLCrKqHTcQ0IPfDyBWCbkkaqeHqPkBF05Ik
-# BS3wVU5hRjABZZCuGgRQVbo3lqQKFaNQJJx0gE3F7yZDiZ3dVCW7dHmf2T4Fbae3
-# Ur23sqGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wGCSqGSIb3DQEHAqCCF20w
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAa/d6vKcrNc4GYANn
+# B28SKjhicCZs6hpoexjktIfjlylL7bAwQ5gCrJ4hMW82WLAimucKONB/0RlLl298
+# zOfdcf1lAyardEZMBTem6oImwfjbjout5VyDeAWT4aBTKWKEiOyswuXKa5WRJUlt
+# Yx+aiVOhQw5SAf7FhOda3GCnu7pPO0SBLw4XXTjkGk8heUPnoGcxQX3ZcZwl/jbH
+# yew8mPkvWyUlnrxyI535z2EP6OKBVLx1S29D2DhFAaSn6HXbBLnKaAJgTHjWX758
+# l6m96NuHCBt8RteERkhvHgp7VTqBMIqATUyrePNIR2UKgK1Zfr0UU2weK6Bt8zoI
+# MB8SaKGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wGCSqGSIb3DQEHAqCCF20w
 # ghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG9w0BCRABBKCCAUEEggE9
-# MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCCwsZX7NXiUM5CX
-# jqZ3uSrPX2p+dWE87yZiNyNtSt09JAIGaqpL6CXVGBMyMDI2MTAwNDIzMDc0NC42
-# MjdaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCAgeYax9q6JXqAd
+# znrv6DT6rhJ/lqa5507lVgOMT7xwowIGaqpL6CVtGBMyMDI2MTAwNDIzMDczOC41
+# MjlaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmljYSBPcGVyYXRpb25zMScw
 # JQYDVQQLEx5uU2hpZWxkIFRTUyBFU046MzcwMy0wNUUwLUQ5NDcxJTAjBgNVBAMT
@@ -426,22 +318,22 @@ if ($failure) {
 # CBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9z
 # b2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3NvZnQgVGltZS1TdGFtcCBQ
 # Q0EgMjAxMAITMwAAAh86cGnkojAulQABAAACHzANBglghkgBZQMEAgEFAKCCAUow
-# GgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqGSIb3DQEJBDEiBCCXH3s5
-# geSZ4v5mG9mN4THcfqcPguvWkS8FQNRORYVFizCB+gYLKoZIhvcNAQkQAi8xgeow
+# GgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqGSIb3DQEJBDEiBCAclJdb
+# ntA55l7+QZffH1LQX2QDVYmJu3krmbDolajOczCB+gYLKoZIhvcNAQkQAi8xgeow
 # gecwgeQwgb0EILAkCt9WkCsMtURkFu6TY0P3UXdRnCiYuPZhe3ykLfwUMIGYMIGA
 # pH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcT
 # B1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQGA1UE
 # AxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIfOnBp5KIwLpUA
 # AQAAAh8wIgQgYn+5X73yR7HmzIU0TXQldmNrzbwUt8KVid4bABSVBrEwDQYJKoZI
-# hvcNAQELBQAEggIAKgGaMz2QtEPUkMqX6tVM8ptLELWkXJ8+6HSDQmE1dEEXkt//
-# /o4TDbgrxke3UU9OgOo3J1SnThRBzH1/FRPJw5VCnWIOAoF6ZXS7IXYGICnjK/9l
-# 6m8/fzG8X7W49xhPBvNTzEckojL3D1UZUctojm30F+CmEov1+xZyG7GIWo0TjJ8Z
-# t6xKH5PF7ftxfQq+r9alLQeASi2cU99dByFQff6ol1HqEBlTU+NjGLA1qQyMzhvI
-# FtEXErhnhXtPLLIZFz6GfYI3gulUyLkUnfUDUbQwS97Eg2GkV1PwE5JIKsLHIXTR
-# N0xSC699Ki131iSh5mhv8c2PZl0VfEkT5yOz32qi22t1yfOVRO4e/jgWwC5QdaWw
-# i45bVb1h7fotyUHeF4kal4XqRxvd/dbPJfVkP1d6ki9WXnQVokq35W59ShiJXdC3
-# 24Tf9cVShqankC3mnK+7Y/k7oeWzkcMLb01u04Sn1MxQueC12+Dtmx+k9ORWpKSF
-# hTpnqNapSAxHdgY0YyOa5BOEDVrAq3qBDqpRntGdzdNfnWvrvBive826RcNr4o29
-# B2zy+wxXW2qpsZ0k++7dOxfCaJqfdaPsVRnTX2fDjER51eMfrqqpzNjhPycZWXgf
-# OwlCiQJkWPwVjaq94pN1/+FwQDxder+p1I99Y+mgi3yyURBmdmDakmJ60X4=
+# hvcNAQELBQAEggIAlcb+AUquPuUnIn1e2O0IOI39z2xjbfrcQcYT7GFgdopOZdE3
+# QSVfGEdp8cIhM2T4RAZhRWaIwsunn0FH7JY2rVz72EIHx2fvD3G4JO6VVQ4trDts
+# JFppnlwR0yGr2Z0JBM6d3818XU3UPBrQrBoiKAbcHZIboODTM2ONgpEHHiwVXplG
+# NE+Uz7Am7RARoG3KjZG8xJOSSyO4yvoN+uchDrx4DcMgredcoDmrNDbMj67hEdEn
+# MCjke+MKTr8+5Cdv1r1E+fDBM5lL58YvkNuF+dhT1vWDj3P02Cdl7mpCPfw8J9mk
+# OB49jucuucBqeuOa7yWkf5fxgJq6qmiNAFQAp+mn4/L8qP//JE8+fOLOGqIgX/p/
+# zlkYPmGdrhBnpZfxJtjSaOg5ADECZnermBbYa3gmkArNzvIZIiK39pzRD/iVUb93
+# MX3Q0PIkwAhgQkca3sqKl/1gnqAOpcwv8LdgOSCSVkDTP7l+SCBgK4B8MTgt01Q9
+# tNhVeuCdBuyiiXUtC1O/gszECS7fwW/WNRypdzXly1YDts/k6eKwETpmR6u3YR5F
+# Nv6OEbK4kysEccs9PcLIxL8KjOL63gEhzGOctwo1i25BmfDzIbep5j81hXlPwjN3
+# O2FLK74cucpCk0G7WMAkDVihdrq7jGHM2pPdJJzF9XdTsgVm7OyDzwCDGjs=
 # SIG # End signature block

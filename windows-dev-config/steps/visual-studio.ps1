@@ -1,156 +1,170 @@
 <#
 .SYNOPSIS
-  Verifies setup signatures and protects installed files from non-elevated writes.
+  Adds workloads and components to Visual Studio Community with the Visual Studio Installer.
 #>
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-function Assert-DevConfigProtectedPath {
+# Matches the Microsoft.VisualStudio.Community winget package in steps\packages.ps1 (Visual Studio 2026, 18.x).
+$Script:DevConfigVsProductId    = 'Microsoft.VisualStudio.Product.Community'
+$Script:DevConfigVsVersionRange = '[18.0,19.0)'
+$Script:DevConfigVsProductName  = 'Visual Studio Community 2026'
+
+# Installer exit codes for success that needs a restart: 1641 (started), 3010 (required), 862968 (recommended).
+$Script:DevConfigVsRestartCodes = @(1641, 3010, 862968)
+
+function Get-DevConfigVsInstallerDirectory {
+    Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+}
+
+# vswhere reports only complete instances unless -all is passed, so a half-finished install never passes the check.
+function Get-DevConfigVisualStudioPath {
     param(
-        [Parameter(Mandatory)] [string] $Path,
-        [switch] $Ancestor
+        [string[]] $Requires = @(),
+        [switch] $IncludeIncomplete
     )
-
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw "Setup cannot use a junction or symbolic link: $Path"
+    $vswhere = Join-Path (Get-DevConfigVsInstallerDirectory) 'vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) {
+        return $null
     }
 
-    $owners = @('S-1-5-18', 'S-1-5-32-544')
-    if ($Ancestor) {
-        # Windows drive roots can be owned by TrustedInstaller.
-        $owners += 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $arguments = @('-products', $Script:DevConfigVsProductId, '-version', $Script:DevConfigVsVersionRange,
+        '-latest', '-property', 'installationPath', '-utf8')
+    if ($IncludeIncomplete) {
+        $arguments += '-all'
     }
-    $acl = Get-Acl -LiteralPath $item.FullName
-    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $owners) {
-        throw "Setup requires an Administrator/SYSTEM-owned directory tree: $Path"
+    if ($Requires.Count -gt 0) {
+        # vswhere matches only instances that have every listed workload or component.
+        $arguments += '-requires'
+        $arguments += $Requires
     }
-    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
-    if ($null -eq $descriptor.DiscretionaryAcl) {
-        throw "Setup cannot use a path without access restrictions: $Path"
+    $result = Invoke-DevConfigNativeCommand -FilePath $vswhere -Arguments $arguments
+    if ($result.ExitCode -ne 0) {
+        throw "vswhere could not list Visual Studio instances (exit code $($result.ExitCode))."
     }
+    return @($result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1
+}
 
-    $unsafeRights = [int][Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
-    # Generic access masks are not named by FileSystemRights.
-    $unsafeRights = $unsafeRights -bor 0x10000000
-    if (-not $Ancestor) {
-        $unsafeRights = $unsafeRights -bor [int][Security.AccessControl.FileSystemRights]::Write -bor 0x40000000
-    }
-    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-        if ($Ancestor -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
-        if ($rule.AccessControlType -eq 'Allow' -and
-            $rule.IdentityReference.Value -notin $owners -and
-            ($rule.FileSystemRights -band $unsafeRights)) {
-            throw "Setup cannot use a path writable or replaceable by non-administrators: $Path"
+function Test-DevConfigVisualStudioComponents {
+    param(
+        [Parameter(Mandatory)] [string[]] $Components
+    )
+    return [bool](Get-DevConfigVisualStudioPath -Requires $Components)
+}
+
+# The installer can update itself and continue in a new setup.exe, so every running copy counts.
+function Get-DevConfigVisualStudioInstallerProcess {
+    $directory = (Get-DevConfigVsInstallerDirectory).TrimEnd('\') + '\'
+    @(Get-Process -Name 'setup' -ErrorAction SilentlyContinue | Where-Object {
+        $process = $_
+        $path = $null
+        try { $path = $process.Path } catch { Write-Verbose "Could not read the path of process $($process.Id)." }
+        $path -and $path.StartsWith($directory, [StringComparison]::OrdinalIgnoreCase)
+    })
+}
+
+function Wait-DevConfigVisualStudioInstaller {
+    param(
+        [int] $TimeoutSeconds = 14400
+    )
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $nextProgress = 60
+    while (@(Get-DevConfigVisualStudioInstallerProcess).Count -gt 0) {
+        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            throw 'The Visual Studio Installer is still running. Close it or let it finish, then run this again.'
         }
+        if ($timer.Elapsed.TotalSeconds -ge $nextProgress) {
+            Write-Host "  still working -- $([int]$timer.Elapsed.TotalMinutes)m so far" -ForegroundColor DarkGray
+            $nextProgress += 60
+        }
+        Start-Sleep -Seconds 2
     }
 }
 
-function Assert-DevConfigProtectedTree {
+function Add-DevConfigVisualStudioComponents {
     param(
-        [Parameter(Mandatory)] [string] $Directory
+        [Parameter(Mandatory)] [string[]] $Components
     )
-
-    $root = Get-Item -LiteralPath $Directory -Force
-    if (-not $root.PSIsContainer) {
-        throw "Setup requires a directory: $Directory"
+    # The installer can still be finishing the Visual Studio install or an update, so wait before reading the instance.
+    if (@(Get-DevConfigVisualStudioInstallerProcess).Count -gt 0) {
+        Write-Host '  (The Visual Studio Installer is running -- waiting up to 5 minutes for it to finish or close.)' -ForegroundColor DarkGray
+        Wait-DevConfigVisualStudioInstaller -TimeoutSeconds 300
     }
-    for ($parent = $root.Parent; $null -ne $parent; $parent = $parent.Parent) {
-        Assert-DevConfigProtectedPath -Path $parent.FullName -Ancestor
-    }
-
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($root.FullName)
-    while ($pending.Count -gt 0) {
-        $path = $pending.Pop()
-        Assert-DevConfigProtectedPath -Path $path
-        $item = Get-Item -LiteralPath $path -Force
-        if ($item.PSIsContainer) {
-            foreach ($child in Get-ChildItem -LiteralPath $path -Force) {
-                $pending.Push($child.FullName)
-            }
+    $installPath = Get-DevConfigVisualStudioPath
+    if (-not $installPath) {
+        if (Get-DevConfigVisualStudioPath -IncludeIncomplete) {
+            throw "$Script:DevConfigVsProductName did not finish installing. Open the Visual Studio Installer to resume or repair it, then run this again."
         }
+        throw "$Script:DevConfigVsProductName is not installed yet, so its workloads cannot be added. Run this again once it is installed."
     }
+    $setup = Join-Path (Get-DevConfigVsInstallerDirectory) 'setup.exe'
+    if (-not (Test-Path -LiteralPath $setup)) {
+        throw 'The Visual Studio Installer is missing. Repair Visual Studio from Settings > Apps, then run this again.'
+    }
+
+    Write-Host '  (Several GB -- the Visual Studio Installer works quietly for a while.)' -ForegroundColor DarkGray
+    # Start-Process joins arguments with spaces, so the install path is quoted here.
+    $arguments = @('modify', '--installPath', "`"$installPath`"")
+    foreach ($component in $Components) {
+        $arguments += '--add', $component
+    }
+    $arguments += '--quiet', '--norestart'
+    # The installer echoes its log into this window; the full log is in its dd_*.log files.
+    $stdout = [System.IO.Path]::GetTempFileName()
+    $stderr = [System.IO.Path]::GetTempFileName()
+    try {
+        $exitCode = Invoke-DevConfigProcess -FilePath $setup -Arguments $arguments -TimeoutSeconds 14400 -NoNewWindow `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        Wait-DevConfigVisualStudioInstaller
+    } finally {
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -eq 0) {
+        return
+    }
+    if ($exitCode -in $Script:DevConfigVsRestartCodes) {
+        Add-DevConfigNote -Warning -Message 'Restart Windows before opening Visual Studio; its installer asked for a restart.'
+        return
+    }
+    if ($exitCode -in @(1003, 8006)) {
+        throw 'Visual Studio is open. Save your work, close it, then run this again.'
+    }
+    if ($exitCode -in @(1001, 1618)) {
+        throw 'Another installation is running. Let it finish, then run this again.'
+    }
+    if ($exitCode -eq -1073720687) {
+        throw 'The Visual Studio Installer could not download what it needs. Check your internet connection or proxy, then run this again.'
+    }
+    throw "The Visual Studio Installer failed with exit code $exitCode. Its logs are the newest dd_*.log files in $env:TEMP."
 }
 
-function New-DevConfigProtectedDirectory {
+function Invoke-VisualStudioPhase {
     param(
-        [Parameter(Mandatory)] [string] $Path
+        [Parameter(Mandatory)] [string[]] $Components
+    )
+    if ($Script:DevConfigAction -eq 'Uninstall') {
+        throw 'The Visual Studio phase has no cleanup steps yet, so no workload can include it in Uninstall.'
+    }
+
+    $shortNames = @($Components | ForEach-Object { $_ -replace '^Microsoft\.VisualStudio\.(Workload|ComponentGroup|Component)\.', '' })
+    # BestEffort lets later phases run when Visual Studio itself could not be installed.
+    $steps = @(
+        New-DevConfigStep -Name 'VisualStudioWorkloads' -Description "Add to Visual Studio: $($shortNames -join ', ')" -BestEffort `
+            -Check { param($Components) Test-DevConfigVisualStudioComponents -Components $Components } `
+            -Apply { param($Components) Add-DevConfigVisualStudioComponents -Components $Components } `
+            -ArgumentList @(, $Components)
     )
 
-    $Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
-    if ($Path -notmatch '^[A-Za-z]:\\[^:]+$') {
-        throw 'Setup requires a local directory, not a drive root or network path.'
-    }
-    $Path = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $parent = [IO.Directory]::GetParent($Path)
-    if (-not $parent -or -not $parent.Exists) {
-        throw "The parent directory must already exist: $Path"
-    }
-    for ($ancestor = $parent; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
-        Assert-DevConfigProtectedPath -Path $ancestor.FullName -Ancestor
-    }
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        $acl = [Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')) {
-            $rights = if ($sid -eq 'S-1-5-32-545') { 'ReadAndExecute' } else { 'FullControl' }
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                [Security.Principal.SecurityIdentifier]::new($sid), $rights,
-                'ContainerInherit, ObjectInherit', 'None', 'Allow'
-            ))
-        }
-        # Set ownership and permissions atomically to prevent unprivileged writes.
-        if ($PSVersionTable.PSEdition -eq 'Core') {
-            [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($Path), $acl)
-        } else {
-            [IO.Directory]::CreateDirectory($Path, $acl) | Out-Null
-        }
-    }
-
-    Assert-DevConfigProtectedTree -Directory $Path
-    return $Path
-}
-
-function Assert-DevConfigMicrosoftSigned {
-    param(
-        [Parameter(Mandatory)] [string] $Directory
-    )
-
-    $Directory = (Get-Item -LiteralPath $Directory -Force).FullName
-    $scripts = @(Get-ChildItem -LiteralPath $Directory -Recurse -File -Filter '*.ps1' -Force)
-    if ($scripts.Count -eq 0) {
-        throw "The Calm OS payload in '$Directory' contains no PowerShell files."
-    }
-
-    $failures = @()
-    foreach ($script in $scripts) {
-        $signature = Get-AuthenticodeSignature -LiteralPath $script.FullName
-        $relativePath = $script.FullName.Substring($Directory.Length).TrimStart([char]'\')
-        if ($signature.Status -ne 'Valid') {
-            $failures += "$relativePath [$($signature.Status)]"
-        } elseif (-not $signature.SignerCertificate -or
-            $signature.SignerCertificate.Subject -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
-            $failures += "$relativePath [unexpected signer]"
-        }
-    }
-
-    if ($failures.Count -gt 0) {
-        $details = ($failures | ForEach-Object { "    $_" }) -join [Environment]::NewLine
-        throw "The Calm OS payload in '$Directory' failed Microsoft signature verification:$([Environment]::NewLine)$details$([Environment]::NewLine)Setup was not started. Use -AllowUnsigned only for development."
-    }
-
-    Write-Host "  Verified $($scripts.Count) Microsoft-signed PowerShell files." -ForegroundColor DarkGray
+    Invoke-DevConfigSteps -Steps $steps
 }
 
 # SIG # Begin signature block
 # MIInNwYJKoZIhvcNAQcCoIInKDCCJyQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCJpZE9z1aUcDne
-# 8qm486fYBIHmo2n/tHOpKMgLT6k1haCCDMkwggYEMIID7KADAgECAhMzAAACHPrN
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBmXt9gKBcEj9cz
+# oFU/dpN4WXoR8UoXNZRKVueQjZyfQaCCDMkwggYEMIID7KADAgECAhMzAAACHPrN
 # xZvoL37EAAAAAAIcMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQxWhcNMjcwNDE1MTg1
@@ -222,19 +236,19 @@ function Assert-DevConfigMicrosoftSigned {
 # MFcxCzAJBgNVBAYTAlVTMR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24x
 # KDAmBgNVBAMTH01pY3Jvc29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIc
 # +s3Fm+gvfsQAAAAAAhwwDQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwG
-# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEICzfBFlb9T/9Ak+weDjj8PObYGnz
-# YrPhBNjRj0hg0EpAMEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
+# CisGAQQBgjcCAQQwLwYJKoZIhvcNAQkEMSIEIEyj8a7s0+r0vEVaUq5Jx2bi2jFG
+# 8qlIwkB8Qohbwax3MEIGCisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBv
 # AGYAdKEagBhodHRwOi8vd3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAE
-# ggEAH9p4UbHMUiThOTH9GPxW+FAGs1M9y89HytpOgNfd7shRnbWjD+NlW39S8Hv+
-# lja6KkA2GxE4+e3k8370f1gyHL1rQ53skDikUO6jWF9TApd43aIH1nKSrlA6LPMz
-# ir+PhONLPBwF4VJc6u98u6AQbNHnrOOMyr1iuztBIViRnlmLSVefkbN7iVkhIm6k
-# gDoq6NmcXsO34FUNiWa1tOheqeTWXSjPn4S35kk2BkjwZ/F016KyniGRjK6SEcqH
-# ZhaYohP3yFK7MwERBiGZciUbcbqKCm+fC7SS/Jdgrvny8MDJm27XG1cifZSLRu89
-# kp9TQ6kU7yE2Nzq3ib+F6hH0I6GCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
+# ggEAWLNFOPMJHWKEGpeDktTHRYt/3zyiS6atWyDhBLoc5OISnj8XkPx+pq/l5zD3
+# yj8/HT+4Zx73ZcfaYVZVpFK3YB/rXif5Rt5hH63MpPvlSJ3kZSS9e5g5nzVultD5
+# Q53ZdjLtgzbRhGsRZMxagWL2kEQJ+T3J8Er5ML5pdYRvovWjj3BXbNk+JstpllZe
+# aHEdsgq8X90mo91DbpmP3uQW8PJkJUWdKz11U+hgS1eXlJv4Id6HSKxjKEzgX+P0
+# 6cRC0m7KPy54Y7meH2KorBq6pdKwXhJQl/nBAGZ3JZikoEqIlCi5bEjSDda9CzBa
+# uunVe+8P6apU3Nlo5kJdW+Wd4KGCF5QwgheQBgorBgEEAYI3AwMBMYIXgDCCF3wG
 # CSqGSIb3DQEHAqCCF20wghdpAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFSBgsqhkiG
 # 9w0BCRABBKCCAUEEggE9MIIBOQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQC
-# AQUABCAD09wALhhQTuFRTLy5v/P1iRChfJxmAwZI7UWrBerGjwIGarUk9rMoGBMy
-# MDI2MTAwNDIzMDY0OS43NzlaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
+# AQUABCC2sZMlZojizwJaRnHF/N1En/r0vqHixUDCtpmV6r2rkwIGarUk9rMmGBMy
+# MDI2MTAwNDIzMDY0OS41NDZaMASAAgH0oIHRpIHOMIHLMQswCQYDVQQGEwJVUzET
 # MBEGA1UECBMKV2FzaGluZ3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMV
 # TWljcm9zb2Z0IENvcnBvcmF0aW9uMSUwIwYDVQQLExxNaWNyb3NvZnQgQW1lcmlj
 # YSBPcGVyYXRpb25zMScwJQYDVQQLEx5uU2hpZWxkIFRTUyBFU046QTkzNS0wM0Uw
@@ -339,22 +353,22 @@ function Assert-DevConfigMicrosoftSigned {
 # MBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9uMSYwJAYDVQQDEx1NaWNyb3Nv
 # ZnQgVGltZS1TdGFtcCBQQ0EgMjAxMAITMwAAAifVwIPDsS5XLQABAAACJzANBglg
 # hkgBZQMEAgEFAKCCAUowGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMC8GCSqG
-# SIb3DQEJBDEiBCAirSTFs6sfl/J2PZy233yEhC5tnkL4a+RHE5N6KY21RDCB+gYL
+# SIb3DQEJBDEiBCDYmWozzdn5EKcnOMYtwvyMQ98pJ31QC2xyrfcMz/PjQTCB+gYL
 # KoZIhvcNAQkQAi8xgeowgecwgeQwgb0EIOXnARo1oVIcOLJKDqlE0adq/jZ9TXdl
 # nXWRcXGThBFyMIGYMIGApH4wfDELMAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hp
 # bmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jw
 # b3JhdGlvbjEmMCQGA1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTAC
 # EzMAAAIn1cCDw7EuVy0AAQAAAicwIgQgVQA3gR/qBeTdpHG81QVcHMBBwll+dSAi
-# Y57/AaDjL/IwDQYJKoZIhvcNAQELBQAEggIAoVCinXzq8MPMiPYmKjUKbilHzEDg
-# m/wRdJNV5b+7vJ6pHG9ISoKtij6nPYSL2vEtbRGOQcfJeKxJH9WwvOPWo+kyfTF7
-# Qq0eK0S+3CQrKgJKswMenpWAbnsBvWbRNTxVx+AtlMMlZ41iiPwdsaWcEJnRMomz
-# kN0Y5f9/r92KWxZdH1W7LnLzo6tN8MGfVT9Cn5r84QxZozsJ00aeqxp849gaO5Gd
-# R46ajTI13MM22m7Cok+CXmh0kNONin0hIHPRGHV7eif6cpb9U4TVyLHnCP4Gtp23
-# epln40rRyg70LaaHHU9h4rodFr2obXoKbDdA41lRCKhs7stm/gc9QdFohyYlzk0W
-# mBDbn0H3iS4wln/kwaYuCtPASSafu2EMUK9AIQ0m6jWYpKSunhX4KGtAb6aFm7NS
-# ZAcffs3btfL11G5At3E4qkh9RI0KqZIDtV3AEYOqJawdt2jpSaJ2tnlyq50tE+Ih
-# pNacKbgOEWtZyzer8dUmJhFwgQ/iEjA5YVeP1PS/zyTlSXvW53hCnxWZ/58bH1xI
-# ot2QP6YCcxbbJODIUO/8GXYXoJc7UT6F6CPsgMlKFwaEVohV0rkotW2GpC9RxCrq
-# GM2qLoa0zCIV0D0ZUvQ2AVxk3h6SikDZX55PwJ1QScAN+cGJW8nYa4OLGVbkMTqo
-# 6FBvBF7+EvSWCnE=
+# Y57/AaDjL/IwDQYJKoZIhvcNAQELBQAEggIAToKZ1+TN9p85PvA+sTjGFYkWQWND
+# zikb4h1akZaQ5NexgF0j3rcA/SJhWjuQ3KBjlRvGJs6rC9qFzjhgxoTVPCmJs/ny
+# ENvLb3aUVjT6EWZn9tNXz9xr6LFI0jzM5g0BXVEzHLWt0J/rUSlTmeOChZ/4snpC
+# jszlj/CeRA+1FcYlnWZFD6Wofjt/+l6f9mnwNvVn+4OMR4aE9ws5eElLfgnBuBrL
+# VQQ+4kfdvhgpphc4YSJl6KOu0Tt6ipR2w2IcI0GDvLbp2VQZp8DL5dyFzvQyvUle
+# JvqsNdNodrD+1P8JavC5DKu8LRWESddUKdFxrtwZYHvbrtmngn+3Cdru5ZAhQBAc
+# UtMFYkyeqMXwldnj8A2DlrkrZCXkkBZ+Zd1NIzRRH2pFyPc4MBdqM3rG1r+I/il7
+# TzAjcrKHRpN6SQduxS+dgrh1t0/JJvRKdOiBI3BXday6wgUmbISUzvNjt/1bI3K0
+# IMvVddeMUukT8R6LLXi9n7Q4bU6v5GpA/kEwZanwskm2wU3M1Vrslq3Ai3CLgsTF
+# MvLJxe0r8kfCz6VvDczoGz+Q9dBQUxonbDl/Ng96/Y3eH5WhO++68J9dSzs/7F3x
+# FlA0/OXKr0XkAJ6WnUkndpf+0fwydFCqp0LSC5mSRhKg9beKKdOtY5kc4DA4xGsR
+# abtEhazlk+TUoIg=
 # SIG # End signature block

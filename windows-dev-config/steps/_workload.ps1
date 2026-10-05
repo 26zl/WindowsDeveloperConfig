@@ -1,82 +1,166 @@
 <#
 .SYNOPSIS
-  Scheduled-task plumbing so the flow can resume elevated after the WSL-required reboot.
+  Loads a workload definition from workloads\ and runs its phases.
 #>
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Each workload has its own task so one workload's run never cancels another's pending resume.
-function Get-DevConfigResumeTaskName {
-    if ($Script:DevConfigWorkload -eq 'devconfig') {
-        return 'WindowsDevConfigResume'
-    }
-    return "WindowsDevConfigResume-$Script:DevConfigWorkload"
-}
+# Unknown keys fail the run so a misspelled setting is not silently ignored.
+$Script:DevConfigWorkloadKeys = @('Name', 'Actions', 'Phases', 'MinimumOSVersion', 'SetupNote', 'UninstallWarning', 'Notes')
+$Script:DevConfigPhaseKeys    = @('File', 'Function', 'Title', 'Parameters', 'Steps', 'Uninstall')
 
-function Clear-DevConfigResume {
-    # SilentlyContinue allows cleanup when no resume task is registered.
-    Unregister-ScheduledTask -TaskName (Get-DevConfigResumeTaskName) -Confirm:$false -ErrorAction SilentlyContinue
-}
-
-function Suspend-DevConfigForReboot {
+function Assert-DevConfigWorkloadDefinition {
     param(
-        [Parameter(Mandatory)] [string] $ScriptPath
+        [Parameter(Mandatory)] [AllowNull()] $Definition,
+        [Parameter(Mandatory)] [string] $Workload
     )
+    if ($Definition -isnot [hashtable]) {
+        throw "workloads\$Workload.ps1 must return a hashtable."
+    }
 
-    $shell = Get-DevConfigTaskShellExe
-    # The limited task requires fresh UAC consent before any resumed code runs elevated.
-    $arguments = (Get-DevConfigRelaunchArguments -ScriptPath $ScriptPath -Resumed -AllowUnsigned:$Script:DevConfigAllowUnsigned -RequestElevation -Action $Script:DevConfigAction -Workload $Script:DevConfigWorkload) -join ' '
-    $action = New-ScheduledTaskAction -Execute $shell -Argument $arguments
+    $problems = @()
+    foreach ($key in $Definition.Keys) {
+        if ($Script:DevConfigWorkloadKeys -notcontains $key) {
+            $problems += "unknown setting '$key'"
+        }
+    }
+    if (-not ($Definition['Name'] -is [string] -and $Definition['Name'])) {
+        $problems += 'Name must be a non-empty string'
+    }
+    $actions = @($Definition['Actions'] | Where-Object { $null -ne $_ })
+    if ($actions.Count -eq 0 -or @($actions | Where-Object { $_ -notin @('Full', 'Partial', 'Uninstall') }).Count -gt 0) {
+        $problems += 'Actions must list Full, Partial, and/or Uninstall'
+    }
+    if ($Definition['MinimumOSVersion'] -and -not ($Definition['MinimumOSVersion'] -as [version])) {
+        $problems += 'MinimumOSVersion must be a version such as 10.0.17763'
+    }
 
-    # Scheduled task logon matching requires the DOMAIN\User or MACHINE\User account name.
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $trigger     = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
-    $principal   = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+    $phases = @($Definition['Phases'] | Where-Object { $null -ne $_ })
+    if ($phases.Count -eq 0) {
+        $problems += 'Phases must list at least one phase'
+    }
+    foreach ($phase in $phases) {
+        if ($phase -isnot [hashtable]) {
+            $problems += 'every phase must be a hashtable'
+            continue
+        }
+        $label = if ($phase['Title']) { "phase '$($phase['Title'])'" } else { 'a phase' }
+        foreach ($key in $phase.Keys) {
+            if ($Script:DevConfigPhaseKeys -notcontains $key) {
+                $problems += "$label has unknown setting '$key'"
+            }
+        }
+        # Files starting with _ are shared helpers, which are always loaded and are never phases.
+        if (-not ($phase['File'] -is [string] -and $phase['File'] -match '^[a-z0-9]+(-[a-z0-9]+)*\.ps1$')) {
+            $problems += "$label needs File set to a phase file under steps\"
+        }
+        if (-not ($phase['Function'] -is [string] -and $phase['Function'] -match '^Invoke-\w+Phase$')) {
+            $problems += "$label needs Function set to the phase's Invoke-<Name>Phase function"
+        }
+        if (-not ($phase['Title'] -is [string] -and $phase['Title'])) {
+            $problems += "$label needs a Title"
+        }
+        if ($phase.ContainsKey('Parameters') -and $phase['Parameters'] -isnot [hashtable]) {
+            $problems += "$label Parameters must be a hashtable"
+        }
+        if ($phase.ContainsKey('Steps') -and
+            (@($phase['Steps']).Count -eq 0 -or @($phase['Steps'] | Where-Object { $_ -isnot [string] -or -not $_ }).Count -gt 0)) {
+            $problems += "$label Steps must list step names"
+        }
+    }
 
-    # A short delay lets desktop and network initialization complete before package checks resume.
+    if ($problems.Count -gt 0) {
+        throw "workloads\$Workload.ps1 is not a valid workload: $($problems -join '; ')."
+    }
+}
+
+function Get-DevConfigWorkload {
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [Parameter(Mandatory)] [string] $Workload,
+        [ValidateSet('Full', 'Partial', 'Uninstall')] [string] $Action = 'Full'
+    )
+    $path = Join-Path $Directory "$Workload.ps1"
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $available = @(Get-ChildItem -LiteralPath $Directory -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.BaseName }) -join ', '
+        throw "There is no '$Workload' workload. Available workloads: $available."
+    }
+
+    # Definitions only describe phases; they are invoked for the requested action and must not change the machine.
+    $definition = & $path -Action $Action
+    Assert-DevConfigWorkloadDefinition -Definition $definition -Workload $Workload
+
+    if (@($definition['Actions']) -notcontains $Action) {
+        throw "The $($definition['Name']) workload supports -Action $(@($definition['Actions']) -join ', ') only."
+    }
+    if ($definition['MinimumOSVersion']) {
+        $current = [Environment]::OSVersion.Version
+        if ($current -lt [version]$definition['MinimumOSVersion']) {
+            throw "The $($definition['Name']) workload needs Windows $($definition['MinimumOSVersion']) or later. This machine runs $current."
+        }
+    }
+    return $definition
+}
+
+# Parameters come from the workload; phases that can reboot also receive the orchestrator path so resume can relaunch it.
+function Resolve-DevConfigWorkloadPhase {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Phase,
+        [Parameter(Mandatory)] [string] $OrchestratorPath
+    )
+    $scriptPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OrchestratorPath)
+    $phasePath = Join-Path (Split-Path -Parent $scriptPath) "steps\$($Phase['File'])"
+    $command = Get-Command -Name $Phase['Function'] -CommandType Function -ErrorAction SilentlyContinue
+    if (-not $command -or $command.ScriptBlock.File -ne $phasePath) {
+        throw "$($Phase['File']) does not define $($Phase['Function'])."
+    }
+
+    $parameters = @{}
+    if ($Phase['Parameters']) {
+        foreach ($name in $Phase['Parameters'].Keys) {
+            if (-not $command.Parameters.ContainsKey($name)) {
+                throw "$($Phase['Function']) has no -$name parameter, so the workload cannot pass it."
+            }
+            $parameters[$name] = $Phase['Parameters'][$name]
+        }
+    }
+    if ($command.Parameters.ContainsKey('OrchestratorPath')) {
+        $parameters['OrchestratorPath'] = $OrchestratorPath
+    }
+
+    # A missing mandatory value would otherwise stop the run at a parameter prompt.
+    foreach ($parameter in $command.Parameters.Values) {
+        $mandatory = @($parameter.Attributes | Where-Object { $_ -is [Parameter] -and $_.Mandatory }).Count -gt 0
+        if ($mandatory -and -not $parameters.ContainsKey($parameter.Name)) {
+            throw "$($Phase['Function']) requires -$($parameter.Name), so the workload must set it in Parameters."
+        }
+    }
+    return @{ Command = $command; Parameters = $parameters }
+}
+
+function Invoke-DevConfigWorkloadPhase {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Phase,
+        [Parameter(Mandatory)] [string] $OrchestratorPath
+    )
+    $resolved = Resolve-DevConfigWorkloadPhase -Phase $Phase -OrchestratorPath $OrchestratorPath
+    $parameters = $resolved.Parameters
+
+    $Script:DevConfigPhaseSteps = $Phase['Steps']
     try {
-        $trigger.Delay = 'PT30S'
-    } catch {
-        Write-Verbose "Could not delay the resume trigger: $($_.Exception.Message)"
+        & $resolved.Command @parameters
+    } finally {
+        $Script:DevConfigPhaseSteps = $null
     }
-
-    Clear-DevConfigResume
-    Save-DevConfigTally -Path (Get-DevConfigTallyPath -Directory (Split-Path -Path $ScriptPath -Parent)) `
-        -TerminalBackedUp $Script:DevConfigTerminalBackedUp
-    Register-ScheduledTask -TaskName (Get-DevConfigResumeTaskName) -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-
-    Write-Host ''
-    Write-Host 'WSL needs a restart to finish. Rebooting in 10s -- setup continues after you' -ForegroundColor Yellow
-    Write-Host 'log back in and accept one more UAC prompt. This is expected, not an error.' -ForegroundColor Yellow
-    Start-Sleep -Seconds 10
-
-    # The resume task is already registered, so a manual restart continues from the same point.
-    # shutdown.exe is used instead of Restart-Computer because the latter goes through WMI even
-    # for the local machine, and that call can time out and report failure mid-restart.
-    $shutdown = Join-Path $env:SystemRoot 'System32\shutdown.exe'
-    $result   = Invoke-DevConfigNativeCommand -FilePath $shutdown -Arguments @('/r', '/t', '0', '/f')
-
-    # 1115 means a restart is already under way, which is the outcome this wants either way.
-    if ($result.ExitCode -ne 0 -and $result.ExitCode -ne 1115) {
-        Write-Host ''
-        Write-Host "Windows would not let setup restart this machine (shutdown.exe returned $($result.ExitCode))." -ForegroundColor Yellow
-        Write-Host 'Restart when convenient -- setup carries on by itself once you log back in.' -ForegroundColor Yellow
-        # Keep the window open so the remaining manual restart instruction is visible.
-        Wait-DevConfigKeyPress
-        exit 0
-    }
-
-    # The restart request returns straight away, so pause before any fall-through code.
-    Start-Sleep -Seconds 60
-    exit 0
 }
 
 # SIG # Begin signature block
 # MIInRAYJKoZIhvcNAQcCoIInNTCCJzECAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCGhd82K3xUChEV
-# Is/Cd52A+9XppD6ds2COUrKGzKLMDqCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDvkeZSxVpNOc9n
+# YlX2QEv+paA3CYtE9rffj4nyMnZr1qCCDLowggX1MIID3aADAgECAhMzAAACHU0Z
 # yE7XD1dIAAAAAAIdMA0GCSqGSIb3DQEBCwUAMFcxCzAJBgNVBAYTAlVTMR4wHAYD
 # VQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jvc29mdCBD
 # b2RlIFNpZ25pbmcgUENBIDIwMjQwHhcNMjYwNDE2MTg1OTQzWhcNMjcwNDE1MTg1
@@ -148,19 +232,19 @@ function Suspend-DevConfigForReboot {
 # MR4wHAYDVQQKExVNaWNyb3NvZnQgQ29ycG9yYXRpb24xKDAmBgNVBAMTH01pY3Jv
 # c29mdCBDb2RlIFNpZ25pbmcgUENBIDIwMjQCEzMAAAIdTRnITtcPV0gAAAAAAh0w
 # DQYJYIZIAWUDBAIBBQCggZAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwLwYJ
-# KoZIhvcNAQkEMSIEIBcjMI2RrElXRGDWCm2DPxASvYn4eDTlRaQ5aV1x3WLvMEIG
+# KoZIhvcNAQkEMSIEIK5wzdsJAJZmePuEJjzSpylO6B09XinLpbD9GDgzZCyzMEIG
 # CisGAQQBgjcCAQwxNDAyoBSAEgBNAGkAYwByAG8AcwBvAGYAdKEagBhodHRwOi8v
-# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAEhgjFldrJoFC45O9
-# lewFKW+5lx2DA5PjfQrmZZTOiL1Ii2WEIH0RokUC2zMg50Xr2O1iKzwAhkFeZW7s
-# MlVZpWj1xW4VgIGsbJ7snc2wHMUEUhg0Pa8bQzxOh28qFTIrEIVCoqsrgVfdp+5Q
-# 08SWi+Qg4y4q4q0k0CCz8HOZGjqWADjJKtJPgZpn9hHzFIdZxwyqODTWTBJgUCEO
-# xADOhg1Id1ULxxBPL83whUlXwUkwZ7UNG4s6DmCQPkgqeh44UT8PynxoUYWUQypd
-# 2ZKgAiQHOufODJIcI4M/wzTlfidEUTRFs+4Z7cltpMx2TJ/9a3QD7OPaPfUsmDRT
-# ZUV2vqGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
+# d3d3Lm1pY3Jvc29mdC5jb20wDQYJKoZIhvcNAQEBBQAEggEAct0Jk0hcn7qnNL3O
+# P8qTIohvjUskVkbzodsgm06qZbcKI47S9NfnwOxZNvGzuIQgTcsN8iVJqryKgXSY
+# XzPIjhJfSCT0fWQ7PgaF/Siz4557iLuFQMAOc1UJXBgb3yxc/s+yUiA8OaOrYywb
+# Iv6ZoqpDwWVK5nMP24dZWOWZcGr4oD0dAZ1sltpfyfofP8EiwKgkCFR3ZPdBtNgu
+# w+F+w5VVkNJ/48sB5QczRtQ4FuxYqhdm5qQDJ+35TVnPLa5gVUBa8NK0VVpiDxQD
+# QzH5Y8FHirhU12mxeQFHStk/no0ZazSRF4IXCfaN0bb680Wa2JNI+1Z25SsZnQwL
+# 6W65pKGCF7AwghesBgorBgEEAYI3AwMBMYIXnDCCF5gGCSqGSIb3DQEHAqCCF4kw
 # gheFAgEDMQ8wDQYJYIZIAWUDBAIBBQAwggFaBgsqhkiG9w0BCRABBKCCAUkEggFF
-# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCBsHoWTvmq3IN1Z
-# jrP2PVo+JxLZgVqun0EdOcWVShYjpAIGaq4418IhGBMyMDI2MTAwNDIzMDY0Ni41
-# NzFaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
+# MIIBQQIBAQYKKwYBBAGEWQoDATAxMA0GCWCGSAFlAwQCAQUABCDiOACw55lBB6s3
+# owexoYdK6rCj+7YtvuDaTleZbRj07AIGaq4418JEGBMyMDI2MTAwNDIzMDY0OS4x
+# ODRaMASAAgH0oIHZpIHWMIHTMQswCQYDVQQGEwJVUzETMBEGA1UECBMKV2FzaGlu
 # Z3RvbjEQMA4GA1UEBxMHUmVkbW9uZDEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBv
 # cmF0aW9uMS0wKwYDVQQLEyRNaWNyb3NvZnQgSXJlbGFuZCBPcGVyYXRpb25zIExp
 # bWl0ZWQxJzAlBgNVBAsTHm5TaGllbGQgVFNTIEVTTjo0MDFBLTA1RTAtRDk0NzEl
@@ -265,22 +349,22 @@ function Suspend-DevConfigForReboot {
 # BAcTB1JlZG1vbmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjEmMCQG
 # A1UEAxMdTWljcm9zb2Z0IFRpbWUtU3RhbXAgUENBIDIwMTACEzMAAAIZXrLYVHX0
 # sY0AAQAAAhkwDQYJYIZIAWUDBAIBBQCgggFKMBoGCSqGSIb3DQEJAzENBgsqhkiG
-# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQghFov1eu3Pjo3z9Jn0S54vol4cKpDx9IY
-# 3DD62nVIVeEwgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCDckX633E1y1EF3
+# 9w0BCRABBDAvBgkqhkiG9w0BCQQxIgQgLOirw6+zbxqi4aouJS2OQDGKvmmYS5Zc
+# NlgOhO8jdGswgfoGCyqGSIb3DQEJEAIvMYHqMIHnMIHkMIG9BCDckX633E1y1EF3
 # 2V18zQcrsgjzI9+3Le7mlvk2OebthjCBmDCBgKR+MHwxCzAJBgNVBAYTAlVTMRMw
 # EQYDVQQIEwpXYXNoaW5ndG9uMRAwDgYDVQQHEwdSZWRtb25kMR4wHAYDVQQKExVN
 # aWNyb3NvZnQgQ29ycG9yYXRpb24xJjAkBgNVBAMTHU1pY3Jvc29mdCBUaW1lLVN0
 # YW1wIFBDQSAyMDEwAhMzAAACGV6y2FR19LGNAAEAAAIZMCIEIKVKj3q6lSulWnzs
-# eky5B+ecjA6VlLIIpGMRxJKO9ax9MA0GCSqGSIb3DQEBCwUABIICAI5UAIOksNMK
-# 2QKPjwRTtow87hvfRNDT03m00Mh45R6Q04hxnDV26GSODtSVFQ+7nF3q+iA1+v6f
-# YL7SPSTvMIEkHFnAx02IV1KcOq0A3Rq4k9WSHjF6e41/3zXxOWFHRRQSw2H+vAPX
-# I4wG7sUowpKe0MgBbFc/CKU/XwWr+dVO03uj8Na45UHAAn+LQdKkAZvyPJXiyqDr
-# xpCZsy/k/RG9nNM5cRJt2wFC+m7Ei9JM3msBtGLN5UAE3T/iVlMJFaWfMwidiG5+
-# L9yrSvaPD0dlMcUKrPzTsuU0tR/PpKlZ7Ax8UfrfSw6dz8R/iYhbtHbG81oCtJic
-# O9+FEhunsJnADaHV4C1rKH59SH/ToQOe/fZkSHgphWAyoSvIVl+omKD2TNsDv+1S
-# bs1SnYwI/SYRGhATOAzZW9/fwGNOB8yPH7vrfnK1Y0zYGyaygSzpDdIfsKbZDowB
-# +YAruTScNWi1aQXpN5c7M+syIoBLip88gfsddNwI1JFBGCqXwWieKgqrJ+5M5cvX
-# sH6nTQjWZygLUojSHl6Dc7VrfWvNdgYpfM/ZXt1KI5GMBKw6SPxCLnGn6l1dmaje
-# 9tay/JmRSASpnO9Q2MtoigfqHsAVqkIqwGpFOJVBCXsmWzLAGphakMQ9YqcJCkj2
-# i7oStqGTCrHMK1YdptWheX6QuDlPzCGw
+# eky5B+ecjA6VlLIIpGMRxJKO9ax9MA0GCSqGSIb3DQEBCwUABIICAAA38GcZuIMK
+# jei+PGlzWqT0I8dgt90ATZ6T405MPCjwfS6qnQ4oF903RT3m3fpmmWSYOp+WkaHo
+# fyu55Hnhw77q52wKM2epBPxk+mXEGY2lh4nDdTX+RORHOmhXoKcIIdMOuYeFjxLR
+# GB0lwlco/KJxwkonEc/YCRIz1U67yJy0Ye+7DAIAZye2JzW38gxPItLrMj7IdJwu
+# Wu7Ms/dyYXv5aN7u3nbvXi+PtvZD8j+05Pcuq97uPbRbeGt9L8n1Z7jqxM8OPkfM
+# 93yqdKMWs7IFmQJOf5jPaEhN4gFx75ZjKqRNKBXa61c8/tXJCSXBuh9uypdD0Pt7
+# v5Qdn0TUa0AFkVkGqvC+JuxwALKy+VcjBi8RSaYwBrb0JsNqsGDAUG6qD7mgYQfY
+# A7eSXdp2UB+F9l74iU6AyzGnRQ/HrADasAMzbEKOZJkTe5MLhEJVYGySFcVdS9u5
+# jWbmDrMcNqG5HEtiHXasG8PUfZBLtHlGDbnKeiiN7bA/7puxmnAxCdOm+9E9twev
+# 8eO7uxN+8uJcaG6n0z6lJKwhyk/BtFaDIKRh+YELuUoEv/S3lI2ie1/n5tlu/pCU
+# 7/hqZ+2zgjJ+VfAgj5fHRt3wHgyXcGaq80012oI24L5E8eF4eF10kCEqEhmOnYDY
+# q7b4w2N66QgDQIeSiK4q9LLG05q7hnfQ
 # SIG # End signature block
