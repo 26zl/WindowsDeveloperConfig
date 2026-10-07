@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `231c59b`, 2026-10-03). Everything is upstream and
+kept in sync with upstream `main` (last merged: `182cd11`, 2026-10-07). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -267,6 +267,13 @@ Still true after these fixes, and worth knowing before running anything else in 
   block that still does not verify), `wsl-comfort\` is 1 `NotSigned`, and `check-signed-drift.ps1`
   reports `winappcli` missing and `wsl-comfort\comfort-shell-bootstrap.sh`, `install.ps1` and
   `readme.md` drifted (the last two because #120 landed in `src/` without a new sign run).
+  Reported upstream as #137 (2026-10-03); upstream's #150 (2026-10-07, "Refresh signed release
+  copies and restore valid signatures", closes #137) re-signed everything and #145 removed
+  `Workloads\winui\install.ps1`. Re-checked 2026-10-07 on a `git archive` of `182cd11`:
+  `windows-dev-config\` 32 `Valid`, `Workloads\` 14 `Valid` and 4 `HashMismatch` (`php`, `python`,
+  `typescript`, `winforms`: freshly re-signed, CRLF, body matching `src/`, still failing in pwsh
+  7.6.6 and Windows PowerShell 5.1), `wsl-comfort\` 1 `Valid`, drift checker all `ok`, `winappcli`
+  copy present. So a fresh clone of this fork now verifies except for those four shims.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
