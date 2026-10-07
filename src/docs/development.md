@@ -28,9 +28,8 @@ needed, and verifies the result.
 Windows Dev Config's engine also runs **single workloads** through
 `bootstrap.ps1 -Workload <name>`, so a workload gets the same one-line,
 signed, elevated setup without `winget configure`. WinUI 3 is the first
-(`irm https://aka.ms/devconfig/winui/setup.ps1 | iex`); its
-`configuration.winget` stays for `winget configure` users and the Command
-Palette extension. See [Adding a workload](../windows-dev-config/README.md#adding-a-workload).
+(`irm https://aka.ms/devconfig/winui/setup.ps1 | iex`) and no longer ships a
+`configuration.winget`. See [Adding a workload](./windows-dev-config.md#adding-a-workload).
 
 Every automated flow is **exercised on a real GitHub-hosted runner** on every
 push, pull request, and nightly: the flow is applied, then a canonical "hello
@@ -40,7 +39,7 @@ configuration actually produced a working toolchain.
 
 ## Supported flows
 
-Each flow's `configuration.winget` — or, for the two PowerShell-native
+Each flow's `configuration.winget` — or, for the PowerShell-native
 flows, its entry script — is the source of truth for what gets installed;
 the table below summarizes it for quick scanning. Flows marked **manual**
 are excluded from the automated CI matrix (they need an interactive
@@ -61,8 +60,8 @@ Command Palette extension.
 | PowerShell        | ✅ automated   | `Microsoft.PowerShell`, `Microsoft.VisualStudioCode`, VS Code PowerShell/Pester extensions + PSScriptAnalyzer settings |
 | WinForms          | 🙋 manual     | `Microsoft.DotNet.SDK.10` + the .NET desktop workload (multi-GB; manual to spare CI minutes) |
 | WinAppCLI         | ✅ automated   | Developer Mode + `Microsoft.DotNet.SDK.10` + `Microsoft.WinAppCli` |
-| WinUI 3           | 🙋 manual     | `Microsoft.DotNet.SDK.10`, `Microsoft.VisualStudio.Community`, `Microsoft.WinAppCli` + WinUI/Universal/ManagedDesktop VS workloads. Also a PowerShell-native one-liner that adds the WinUI `dotnet new` templates ([`workloads/winui.ps1`](../windows-dev-config/workloads/winui.ps1)) |
-| Windows Dev Config | 🙋 manual     | PowerShell setup for developer tools, Windows settings, fonts, Terminal, and WSL + Ubuntu (see [`windows-dev-config/README.md`](../windows-dev-config/README.md)) |
+| WinUI 3           | 🙋 manual     | PowerShell-native one-liner: Developer Mode, PowerShell 7, `Microsoft.DotNet.SDK.10`, `Microsoft.WinAppCli`, Visual Studio Community 2026 with the WinUI workloads, and the WinUI `dotnet new` templates ([`workloads/winui.ps1`](../windows-dev-config/workloads/winui.ps1)) |
+| Windows Dev Config | 🙋 manual     | PowerShell setup for developer tools, Windows settings, fonts, Terminal, and WSL + Ubuntu (see [`windows-dev-config/README.md`](../windows-dev-config/README.md), contributor internals in [`windows-dev-config.md`](./windows-dev-config.md)) |
 | Comfort Shell     | 🙋 manual     | WSL distro + zsh/bash + starship + modern CLI bundle + Cascadia Code Nerd Font + themed Windows Terminal profile (see [`wsl-comfort/readme.md`](../wsl-comfort/readme.md)) |
 
 See [`manifest.yml`](../manifest.yml) for the canonical declarative
@@ -93,7 +92,7 @@ Workloads/
   java/            # configuration.winget (core) + install.ps1 (thin shim)
   rust/            # configuration.winget (core) + install.ps1 (thin shim)
   winforms/        # configuration.winget (core) + install.ps1 (thin shim)
-  winui/           # configuration.winget (core) + install.ps1 (thin shim) + setup.ps1 (one-line setup via the engine)
+  winui/           # setup.ps1 (one-line setup via the engine)
 windows-dev-config/    # Windows Dev Config — bootstrap.ps1 (remote entry) + dev-config.ps1 (orchestrator) + steps/*.ps1 + workloads/*.ps1 (devconfig, winui) + README.md
 wsl-comfort/           # Comfort Shell — install.ps1 (Windows side) + comfort-shell-bootstrap.sh (Linux side, self-contained) + readme.md
 tests/
@@ -134,6 +133,7 @@ This repo carries **two parallel copies** of every flow:
 | `src/manifest.yml`            | Single source-of-truth for every flow (paths, build/run, ids).    | **Yes**  | n/a      |
 | `src/future/cmdpal/`          | Command Palette extension. C# project. Reads `src/manifest.yml`.  | **Yes**  | n/a      |
 | `src/docs/development.md`     | Contributor docs (CI, validation, how to add a language).         | **Yes**  | n/a      |
+| `src/docs/windows-dev-config.md` | Windows Dev Config internals: file layout, phases, releases, workloads. | **Yes**  | n/a      |
 | `src/tests/`                  | Hello-world programs + expected stdout used by the CI harness.    | **Yes**  | CI only  |
 
 **End users**: follow the [top-level README](../../README.md). Windows Dev Config's `bootstrap.ps1` verifies Microsoft signatures and installs to `%ProgramData%\CalmOS` with Administrator/SYSTEM-only write access. It requests process-scoped `RemoteSigned` without adding trusted publishers. Organization-enforced `AllSigned` may still prompt. For development, `-AllowUnsigned` uses `src/windows-dev-config/` without signature checks.
@@ -360,4 +360,4 @@ To give a workload a one-line setup on the PowerShell engine (like
 `irm https://aka.ms/devconfig/winui/setup.ps1 | iex`), add a workload
 definition under `windows-dev-config/workloads/` and a `setup.ps1` wrapper
 next to its `configuration.winget`. The steps are in
-[Adding a workload](../windows-dev-config/README.md#adding-a-workload).
+[Adding a workload](./windows-dev-config.md#adding-a-workload).

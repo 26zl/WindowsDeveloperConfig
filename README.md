@@ -20,37 +20,21 @@
 
 ---
 
-Your dev environment should help you ship, not become another project to debug. Try the new Windows developer configuration and spend less time setting up, more time building something awesome.  
+Set up a new Windows dev box in minutes, not hours. Pick a setup below, run one command, get back to building. Everything here is **idempotent** — safe to re-run any time, on any machine, in any state.
 
 ## 🎯 Pick your setup
 
-Three developer setups live in this repo. Pick the one that matches what you want:
-
 | You want... | Go to |
 | --- | --- |
-| A complete dev workstation: tools, OS settings, WSL, and terminal. One command, restarts once. | [Windows Dev Config](#%EF%B8%8F-windows-dev-config) |
-| A polished WSL shell: zsh/bash, Starship, CLI tools, and a themed terminal profile. Interactive or unattended. | [WSL Comfort](#-wsl-comfort) |
-| A single language toolchain: Node, Python, SQL, PowerShell, .NET, Rust, Go, Java, PHP, WinForms, or WinUI 3. One command each. | [Workloads](#-single-language-workloads) |
+| A complete dev workstation: tools, OS settings, WSL, and terminal. One command, one restart. | [Windows Dev Config](#%EF%B8%8F-windows-dev-config) |
+| A polished WSL shell: zsh/bash, Starship, CLI tools, themed terminal. | [WSL Comfort](#-wsl-comfort) |
+| One language toolchain: Node, Python, SQL, PowerShell, .NET, Rust, Go, Java, PHP, WinForms, or WinUI 3. | [Workloads](#-single-language-workloads) |
 
 ## 🖥️ Windows Dev Config
 
-*Turns a fresh Windows 11 box into a clean, distraction-free dev workstation in one shot.*
-
-A set of PowerShell scripts that installs dev tools, applies opinionated Windows settings, and sets up WSL + Ubuntu through the required reboot. Nothing to clone, nothing to install first. Idempotent, so it's safe to re-run on an existing machine.
+Installs dev tools, applies opinionated Windows settings, and sets up WSL + Ubuntu — restart included. Nothing to clone, nothing to install first. 
 
 Open any PowerShell window — elevated or not — and run:
-
-### Standard Experience
-```powershell
-irm https://aka.ms/devconfig/standard/setup.ps1 | iex
-```
-
-### Full Experience
-```powershell
-irm https://aka.ms/devconfig/full/setup.ps1 | iex
-```
-
-> ⚠️ **It will restart your machine, once.** Enabling WSL needs a Windows optional feature that requires a restart. You get a 10-second warning, and a scheduled task resumes setup after you sign back in and accept the UAC prompt. **Save your work before you start.**
 
 <details>
 <summary><strong>What you get</strong></summary>
@@ -67,21 +51,31 @@ irm https://aka.ms/devconfig/full/setup.ps1 | iex
 - **Remote Desktop:** Enabled and firewall settings set
 </details>
 
-Full details — every setting it changes, how to undo them, and troubleshooting: [`windows-dev-config/README.md`](./src/windows-dev-config/README.md).
+### Standard Experience
+```powershell
+irm https://aka.ms/devconfig/standard/setup.ps1 | iex
+```
+
+### Full Experience
+```powershell
+irm https://aka.ms/devconfig/full/setup.ps1 | iex
+```
+
+> ⚠️ **Possible computer restart:** WSL requires virtualization enabled. Save your work before you start.  The script will start off where it left off post-reboot.
+
+Full details — every tool and setting, how to undo them, and troubleshooting: [`windows-dev-config/README.md`](./src/windows-dev-config/README.md).
 
 <br/>
 
 ## 🐧 WSL Comfort
 
-*Also known as Comfort Shell. An interactive setup for a polished Windows + WSL shell environment.*
-
-WSL Comfort stands apart. It supports both interactive and non-interactive modes, and lets you pick and choose individual components. The Windows side handles WSL, the distro, the Cascadia Code Nerd Font, and a themed Windows Terminal profile. The Linux side runs inside the distro and configures the shell itself.
+*Also known as Comfort Shell. A polished Windows + WSL shell setup — zsh/bash, Starship prompt, modern CLI tools, themed terminal.*
 
 ```powershell
 .\wsl-comfort\install.ps1
 ```
 
-Interactive by default. Use `-NonInteractive` for unattended runs; the bootstrap also takes `--minimal` for a smaller setup. The Linux half is standalone, so you can copy `comfort-shell-bootstrap.sh` onto any Ubuntu host and run it directly.
+Interactive by default — pick and choose components as it runs. Use `-NonInteractive` for unattended installs. The Linux half (`comfort-shell-bootstrap.sh`) is standalone, so you can also copy it onto any Ubuntu host and run it directly.
 
 <details>
 <summary><strong>What you can pick</strong></summary>
@@ -102,40 +96,7 @@ Full details: [`wsl-comfort/readme.md`](./wsl-comfort/readme.md).
 
 ## 🧪 Single-language workloads
 
-Just want one toolchain? Each workload ships a `configuration.winget` file plus a matching `install.ps1` shim that applies it and refreshes PATH in the current session. WinUI 3 also has a one-line setup that needs neither.
-
-### One-line setup
-
-WinUI 3 runs on the same engine as Windows Dev Config: one command, nothing to clone, no `winget configure`. Open any PowerShell window — elevated or not — and run:
-
-```powershell
-irm https://aka.ms/devconfig/winui/setup.ps1 | iex
-```
-
-It enables Developer Mode and installs PowerShell 7, .NET SDK 10, the Windows App CLI, Visual Studio Community 2026 with the WinUI workloads, and the WinUI `dotnet new` templates. It is idempotent, so re-running it only fixes what has drifted. Details: [Single workloads](./src/windows-dev-config/README.md#single-workloads).
-
-### With `winget configure`
-
-Pick a row. Most of the single-language workloads use [`winget configure`](https://learn.microsoft.com/en-us/windows/package-manager/winget/configure). If you've never used it before, enable it once:
-
-```powershell
-winget configure --enable
-```
-
-> [!IMPORTANT]
-> If `winget` is being invoked from a **non-elevated** environment, the Microsoft Visual C++ Redistributable ([aka.ms/vcredist](https://aka.ms/vcredist)) must also be installed — without it `winget configure` fails with an internal error. Install it once with the command for your machine's architecture:
->
-> ```powershell
-> # x64:
-> winget install Microsoft.VCRedist.2015+.x64
->
-> # ARM64:
-> winget install Microsoft.VCRedist.2015+.arm64
-> ```
-
-If that fails or `winget configure` is still not recognized, see [Troubleshooting](#-troubleshooting). Windows Dev Config doesn't use `winget configure` and needs none of this.
-
-<br/>
+Just want one toolchain? Pick a row.
 
 | Workload   | Installs                                                                | Run                                                                                                                            |
 | ---------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -150,15 +111,9 @@ If that fails or `winget configure` is still not recognized, see [Troubleshootin
 | PowerShell | PowerShell 7 + VS Code PowerShell extensions + PSScriptAnalyzer settings | `winget configure -f .\Workloads\powershell\configuration.winget --accept-configuration-agreements --disable-interactivity` |
 | WinForms   | .NET SDK 10 + Windows Forms desktop workload                            | `winget configure -f .\Workloads\winforms\configuration.winget --accept-configuration-agreements --disable-interactivity`   |
 | WinAppCLI  | Developer Mode + .NET SDK 10 + Windows App Development CLI             | `winget configure -f .\Workloads\winappcli\configuration.winget --accept-configuration-agreements --disable-interactivity` |
-| WinUI 3    | .NET SDK 10 + Visual Studio Community + Windows App SDK / WinUI 3 + WinAppCLI | `winget configure -f .\Workloads\winui\configuration.winget --accept-configuration-agreements --disable-interactivity` |
+| WinUI 3    | .NET SDK 10 + Visual Studio Community + Windows App SDK / WinUI 3 + WinAppCLI + Developer Mode | `irm https://aka.ms/devconfig/winui/setup.ps1 \| iex` |
 
-Want the PATH refresh in your current shell? Use the matching shim instead of calling `winget configure` directly:
-
-```powershell
-.\Workloads\python\install.ps1
-```
-
-> **Heads up:** WinForms and WinUI 3 pull down several gigabytes of Visual Studio components. Fine on a real workstation, painful on a small VM.
+Each one installs via [`winget configure`](https://learn.microsoft.com/en-us/windows/package-manager/winget/configure) — if it's not enabled yet or fails, see [Troubleshooting](#-troubleshooting).
 
 <br/>
 
@@ -174,7 +129,7 @@ Run `winget configure --enable`. If `winget configure` is still not recognized a
 <details>
 <summary><strong><code>winget configure</code> fails with "internal error" / error code <code>-2146233079</code></strong></summary>
 
-This usually means the Microsoft Visual C++ Redistributable is missing — `winget configure` depends on it when invoked from a non-elevated environment. Install it once with the command for your architecture, then re-run:
+The Visual C++ Redistributable is missing. Install it, then re-run:
 
 ```powershell
 # x64:
@@ -184,7 +139,7 @@ winget install Microsoft.VCRedist.2015+.x64
 winget install Microsoft.VCRedist.2015+.arm64
 ```
 
-See [aka.ms/vcredist](https://aka.ms/vcredist) for the standalone installer. The repo's [`Workloads/_common/enable-winget-configure.ps1`](./Workloads/_common/enable-winget-configure.ps1) script also installs it automatically as part of enabling `winget configure`.
+[`Workloads/_common/enable-winget-configure.ps1`](./Workloads/_common/enable-winget-configure.ps1) installs it automatically as part of enabling `winget configure`.
 
 </details>
 
@@ -198,7 +153,7 @@ Open a new terminal, or run the matching `install.ps1` shim to refresh PATH in t
 <details>
 <summary><strong>Windows Dev Config rebooted the machine and looks stuck</strong></summary>
 
-It registered a scheduled task named `WindowsDevConfigResume`, so the run picks itself back up about 30 seconds after you sign back in. A window opens on its own and finishes the WSL setup. If nothing appears after a couple of minutes, run the one-liner again — it's safe to re-run and skips everything already done. More detail in [`windows-dev-config/README.md`](./src/windows-dev-config/README.md#troubleshooting).
+A scheduled task resumes the run about 30 seconds after you sign back in and finishes the WSL setup. Nothing after a couple of minutes? Run the one-liner again — it's safe to re-run and skips everything already done. More detail in [`windows-dev-config/README.md`](./src/windows-dev-config/README.md#troubleshooting).
 
 </details>
 
