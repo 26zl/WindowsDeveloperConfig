@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `182cd11`, 2026-10-07). Everything is upstream and
+kept in sync with upstream `main` (last merged: `0be0f2a`, 2026-10-09). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -225,7 +225,7 @@ version); the SKILL.md/cmdpal, SUPPORT.md and `wsl-comfort-shell` rows are draft
 | `.gitattributes` | `*.sh` is checked out with LF. Windows checkouts previously produced CRLF bash scripts. |
 | `src/tests/wsl-comfort-shell/` | Deleted. Nothing referenced it after the flow was renamed to `comfort-shell` (`src/tests/comfort-shell/`). Draft 12. |
 | `src/wsl-comfort/install.ps1`, `readme.md` | The closing message names the profile the script actually creates (`Comfort Shell - <distro>`), and the readme names the real function (`Get-InstalledWslDistros`). Merged upstream as #120. |
-| `src/future/cmdpal/` | `ExtensionConfig` defaults point at `microsoft/WindowsDeveloperConfig` `main` and `src/manifest.yml` instead of a private personal clone path. The fix-it script path is `Workloads/_common/enable-winget-configure.ps1`; the `scripts/windows/` layout no longer exists. README config example and build path updated. Still open: the DSC summary parser understands only the v0.2 `- resource:` format, so every dscv3 flow shows "No resources found". |
+| `src/future/cmdpal/` | `ExtensionConfig` defaults point at `microsoft/WindowsDeveloperConfig` `main` and `src/manifest.yml` instead of a private personal clone path. The fix-it script path is `Workloads/_common/enable-winget-configure.ps1`; the `scripts/windows/` layout no longer exists. README config example and build path updated. Upstream #104 (merged 2026-10-07) changed the `LocalPath` default to `C:\WindowsDeveloperConfig` and replaced the "Known gap" README paragraph (the extension now runs `windows.install` directly); both taken from upstream in the 2026-10-09 merge, the other defaults above are still the fork's. Still open: the DSC summary parser understands only the v0.2 `- resource:` format, so every dscv3 flow shows "No resources found". |
 
 ## Audit fixes (2026-09-19)
 
@@ -274,6 +274,13 @@ Still true after these fixes, and worth knowing before running anything else in 
   `typescript`, `winforms`: freshly re-signed, CRLF, body matching `src/`, still failing in pwsh
   7.6.6 and Windows PowerShell 5.1), `wsl-comfort\` 1 `Valid`, drift checker all `ok`, `winappcli`
   copy present. So a fresh clone of this fork now verifies except for those four shims.
+  Those four were the locale-dependent case (em dash in a BOM-less UTF-8 file, hashed as
+  Windows-1252 by the signer, verified as UTF-8 on a machine with code page 65001); reported as a
+  comment on #137 on 2026-10-07 and fixed upstream the same night by #154 (hyphen instead of the
+  dash), #156 (release signature verification) and #157 (re-sign). On a `git archive` of `0be0f2a`
+  (2026-10-09) every `.ps1` under the three roots is `Valid`: 32, 43 and 1. The drift checker now
+  lists the `dotnet`/`php` workload files from #158/#162 as not yet mirrored, which is just the
+  next sign cycle.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
