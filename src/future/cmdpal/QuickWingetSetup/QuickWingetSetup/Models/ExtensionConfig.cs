@@ -8,7 +8,7 @@ public class ExtensionConfig
     public string Source { get; set; } = "local";
 
     [JsonPropertyName("localPath")]
-    public string LocalPath { get; set; } = @"C:\Users\crutkas\WindowsDevSetupScripts";
+    public string LocalPath { get; set; } = @"C:\WindowsDeveloperConfig";
 
     [JsonPropertyName("githubRepo")]
     public string GithubRepo { get; set; } = "crutkas/WindowsDevSetupScripts";
