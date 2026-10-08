@@ -53,6 +53,8 @@ function Reset-TestState([string] $Mode = 'Cli') {
     $Script:Calls = @()
     $Script:Delays = @()
     $Script:Repairs = 0
+    $Script:CliChecks = 0
+    $Script:CliUsable = $true
     $Script:LocalApplied = $false
 }
 function Read-MockResult([string] $Command) {
@@ -74,6 +76,11 @@ function Install-WinGetPackage($Id, $Source, $Mode, $MatchOption, $ErrorAction) 
     Assert ($Source -eq 'winget') 'Module install must target winget.'
     Read-MockResult "Install-WinGetPackage $Id"
 }
+function Update-WinGetPackage($Id, $Source, $Mode, $MatchOption, $ErrorAction) {
+    Assert ($Source -eq 'winget') 'Module upgrade must target winget.'
+    Read-MockResult "Update-WinGetPackage $Id"
+}
+function Test-DevConfigWingetCliUsable { $Script:CliChecks++; return $Script:CliUsable }
 function Start-Sleep($Seconds) { $Script:Delays += $Seconds }
 function Initialize-DevConfigWinGet {}
 function Invoke-DevConfigWinGetDeployment { $Script:Repairs++ }
@@ -319,6 +326,88 @@ Check 'Cleanup bypasses exhausted setup source state' {
     $Script:Results.Enqueue((New-CliResult))
     $result = Invoke-DevConfigWingetCli -Arguments @('uninstall', '--id', 'Example.Tool', '--exact')
     Assert ($result.ExitCode -eq 0 -and $Script:Calls.Count -eq 1) 'Raw CLI cleanup calls must remain available.'
+}
+
+foreach ($mode in @('Cli', 'Module')) {
+    Check "$mode AI state queries retain absent, current, and upgrade-available results" {
+        foreach ($state in @('Absent', 'Current', 'UpgradeAvailable')) {
+            Reset-TestState $mode
+            if ($mode -eq 'Cli') {
+                $Script:Results.Enqueue((New-CliResult $(if ($state -eq 'Absent') { $Script:DevConfigWingetNotFound } else { 0 })))
+                if ($state -ne 'Absent') {
+                    $Script:Results.Enqueue((New-CliResult -Output $(if ($state -eq 'UpgradeAvailable') { 'Tool Example.Tool 1.0 2.0 winget' } else { 'No upgrades' })))
+                }
+            } else {
+                $Script:Results.Enqueue($(if ($state -eq 'Absent') { $null } else { [pscustomobject]@{ IsUpdateAvailable = ($state -eq 'UpgradeAvailable') } }))
+            }
+            $result = Get-DevConfigWingetPackageState -Id 'Example.Tool'
+            Assert ($result.State -eq $state -and $Script:Results.Count -eq 0) 'AI package state must match the actual query result.'
+            Assert (-not $Script:DevConfigWingetSourceFailure -and $Script:Delays.Count -eq 0) 'Healthy AI queries must not retry or disable the source.'
+            if ($mode -eq 'Cli') {
+                Assert (@($Script:Calls | Where-Object { $_ -notmatch '--source winget' }).Count -eq 0) 'AI queries must target only winget.'
+            }
+        }
+    }
+
+    Check "$mode AI state queries recover from transient source failures" {
+        Reset-TestState $mode
+        foreach ($attempt in 1..2) {
+            $Script:Results.Enqueue($(if ($mode -eq 'Cli') { New-CliResult -1978335217 } else { New-CatalogFailure }))
+        }
+        $Script:Results.Enqueue($(if ($mode -eq 'Cli') { New-CliResult $Script:DevConfigWingetNotFound } else { $null }))
+        $result = Get-DevConfigWingetPackageState -Id 'Example.Tool'
+        Assert ($result.State -eq 'Absent' -and $Script:Calls.Count -eq 3) 'AI queries must accept a recovered source result.'
+        Assert (-not $Script:DevConfigWingetSourceFailure -and ($Script:Delays -join ',') -eq '5,10') 'Recovered AI queries must leave the source available.'
+    }
+
+    Check "$mode AI source exhaustion blocks queries, installs, and upgrades" {
+        Reset-TestState $mode
+        foreach ($attempt in 1..3) {
+            $Script:Results.Enqueue($(if ($mode -eq 'Cli') { New-CliResult -1978335217 } else { New-CatalogFailure }))
+        }
+        $null = Expect-Failure { Get-DevConfigWingetPackageState -Id 'Example.First' }
+        $null = Expect-Failure { Get-DevConfigWingetPackageState -Id 'Example.Second' }
+        $null = Expect-Failure { Install-DevConfigWingetPackage -Id 'Example.Second' -AllowCliFallback -DisableInteractivity }
+        $null = Expect-Failure { Update-DevConfigWingetPackage -Id 'Example.Second' -AllowCliFallback -DisableInteractivity }
+        Assert ($Script:Calls.Count -eq 3 -and $Script:DevConfigWingetSourceFailure) 'AI operations must share the exhausted source allowance.'
+        Assert (($Script:Delays -join ',') -eq '5,10' -and $Script:CliChecks -eq 0) 'An exhausted source must not trigger additional retries or fallback probes.'
+    }
+
+    foreach ($operation in @('Install', 'Update')) {
+        Check "$mode AI $operation preserves source errors without a usable fallback" {
+            Reset-TestState $mode
+            $Script:CliUsable = $false
+            foreach ($attempt in 1..3) {
+                $Script:Results.Enqueue($(if ($mode -eq 'Cli') { New-CliResult -1978335163 } else { New-ModuleResult 'CatalogError' -1978335163 }))
+            }
+            $failure = Expect-Failure { & "$operation-DevConfigWingetPackage" -Id 'Example.First' -AllowCliFallback -DisableInteractivity }
+            Assert ($failure.Exception.Message -match 'winget source is unavailable after retries') 'AI acquisition errors must retain source-failure classification.'
+            $null = Expect-Failure { & "$operation-DevConfigWingetPackage" -Id 'Example.Second' -AllowCliFallback -DisableInteractivity }
+            Assert ($Script:Calls.Count -eq 3 -and ($Script:Delays -join ',') -eq '5,10') 'Later AI acquisitions must not repeat source retries.'
+            if ($mode -eq 'Cli') {
+                Assert (@($Script:Calls | Where-Object { $_ -notmatch '--disable-interactivity' }).Count -eq 0) 'AI CLI acquisition must remain noninteractive.'
+            } else {
+                Assert ($Script:CliChecks -eq 3) 'Each module failure must still honor the requested fallback.'
+            }
+        }
+    }
+}
+
+foreach ($operation in @('Install', 'Update')) {
+    Check "AI $operation fallback retains CLI source errors" {
+        Reset-TestState Module
+        foreach ($attempt in 1..3) {
+            $Script:Results.Enqueue([InvalidOperationException]::new('Module unavailable'))
+            $Script:Results.Enqueue((New-CliResult -1978335157))
+        }
+        $failure = Expect-Failure { & "$operation-DevConfigWingetPackage" -Id 'Example.First' -AllowCliFallback -DisableInteractivity }
+        Assert ($failure.Exception.Message -match 'winget source is unavailable after retries') 'CLI fallback must preserve the source error code.'
+        Assert ($Script:Calls.Count -eq 6 -and $Script:CliChecks -eq 3) 'Each acquisition attempt may probe and use the opted-in CLI fallback.'
+        Assert ($Script:DevConfigWinGetMode -eq 'Module') 'Failed fallback must not select CLI mode.'
+        $null = Expect-Failure { Get-DevConfigWingetPackageState -Id 'Example.Second' }
+        $null = Expect-Failure { & "$operation-DevConfigWingetPackage" -Id 'Example.Second' -AllowCliFallback -DisableInteractivity }
+        Assert ($Script:Calls.Count -eq 6 -and ($Script:Delays -join ',') -eq '5,10') 'Fallback source exhaustion must stop subsequent AI package work.'
+    }
 }
 
 Check 'Generic retries retain their default behavior and timeout handling' {

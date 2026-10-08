@@ -16,6 +16,10 @@ checks WinGet retry/fallback behavior with simulated package operations,
 without changing the machine; run it in both Windows PowerShell 5.1 and
 PowerShell 7.
 
+`src\tests\calm-os\pwsh-discovery-checks.ps1` checks MSI, MSIX, and portable
+PowerShell discovery and handoff without installing software. Run it in both
+Windows PowerShell 5.1 and PowerShell 7.
+
 ## File layout
 
 | File | What it is |
@@ -53,11 +57,43 @@ Run the isolated WSL probe checks from the repository root in Windows PowerShell
 
 ## Publishing a release
 
-1. Sign and publish the payload files as commit A.
-2. Set `$payloadRef` to A's full SHA in the source launchers: `setup-full.ps1`, `setup-standard.ps1`, `uninstall.ps1`, and `Workloads/winui/setup.ps1`.
-3. Sign those updated launchers and publish their signed copies as commit B. Do not edit them after signing.
+1. Complete a public-content and privacy review of source, documentation, examples, fixtures, generated reports, and release notes.
+2. Sign and publish the payload files as commit A.
+3. Set `$payloadRef` to A's full SHA in the source launchers: `setup-full.ps1`, `setup-standard.ps1`, `uninstall.ps1`, and `Workloads/winui/setup.ps1`.
+4. Sign those updated launchers and publish their signed copies as commit B. Do not edit them after signing.
+
+Include all AI `Workloads/**/setup.ps1` launchers in the same payload pinning
+and signing cycle.
 
 The launchers in B download bootstrap and its payload from A. Short URLs keep pointing at the launchers on `main` — publishing a new launcher doesn't change the payload commit an older launcher uses. Direct bootstrap calls with a branch or tag still use Git ref discovery.
+
+### Local AI short links
+
+Point these short links at the matching signed repository-root files, not `src/`:
+
+| Short link | Signed file | Bootstrap parameters |
+| --- | --- | --- |
+| `https://aka.ms/devconfig/local-ai/setup.ps1` | `Workloads/local-ai/setup.ps1` | `-Scenario local-ai` |
+| `https://aka.ms/devconfig/local-ai/llama.cpp/setup.ps1` | `Workloads/local-ai/llama.cpp/setup.ps1` | `-Scenario local-ai -AiRuntime LlamaCpp` |
+| `https://aka.ms/devconfig/local-ai/ollama/setup.ps1` | `Workloads/local-ai/ollama/setup.ps1` | `-Scenario local-ai -AiRuntime Ollama` |
+| `https://aka.ms/devconfig/local-ai/foundry/setup.ps1` | `Workloads/local-ai/foundry/setup.ps1` | `-Scenario local-ai -AiRuntime Foundry` |
+| `https://aka.ms/devconfig/pytorch/setup.ps1` | `Workloads/pytorch/setup.ps1` | `-Scenario pytorch` |
+| `https://aka.ms/devconfig/cuda/setup.ps1` | `Workloads/cuda/setup.ps1` | `-Scenario cuda` |
+| `https://aka.ms/devconfig/rocm/setup.ps1` | `Workloads/rocm/setup.ps1` | `-Scenario rocm` |
+| `https://aka.ms/devconfig/intel-ai/setup.ps1` | `Workloads/intel-ai/setup.ps1` | `-Scenario intel-ai` |
+| `https://aka.ms/devconfig/llama.cpp/setup.ps1` | `Workloads/llama.cpp/setup.ps1` | `-Scenario llama.cpp` |
+| `https://aka.ms/devconfig/ollama/setup.ps1` | `Workloads/ollama/setup.ps1` | `-Scenario ollama` |
+| `https://aka.ms/devconfig/foundry/setup.ps1` | `Workloads/foundry/setup.ps1` | `-Scenario foundry` |
+
+Each launcher verifies the Microsoft signature before invoking bootstrap.
+Run the short links with `irm <url> | iex`. Bootstrap elevates, downloads and
+verifies the dependency tree, then runs only the selected installer.
+`install.ps1` remains the local entry point and requires the repository files.
+
+For advanced options, call bootstrap with `-Scenario <name>`. `-PlanOnly`
+applies to every AI scenario; `-ReportRoot` selects the report directory
+(`\<name>.json` for standalone workloads). `-AiBackend` and `-RequireTriton`
+apply only to `local-ai` and `pytorch`; `-AiRuntime` applies only to `local-ai`.
 
 ## Adding a workload
 

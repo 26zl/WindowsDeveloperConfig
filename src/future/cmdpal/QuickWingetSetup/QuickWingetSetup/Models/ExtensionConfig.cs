@@ -9,7 +9,7 @@ public class ExtensionConfig
 
     /// <summary>Repository root of a local clone; only used when <see cref="Source"/> is "local".</summary>
     [JsonPropertyName("localPath")]
-    public string LocalPath { get; set; } = string.Empty;
+    public string LocalPath { get; set; } = @"C:\WindowsDeveloperConfig";
 
     [JsonPropertyName("githubRepo")]
     public string GithubRepo { get; set; } = "microsoft/WindowsDeveloperConfig";

@@ -190,6 +190,8 @@ function Install-DevConfigWinGetRelease {
 }
 
 function Confirm-DevConfigWinGetReady {
+    param([switch] $AllowCliFallback)
+
     if ($Script:DevConfigWinGetMode -eq 'Cli') {
         return
     }
@@ -201,9 +203,15 @@ function Confirm-DevConfigWinGetReady {
             } | Out-Null
             return
         } catch {
+            $moduleError = $_.Exception.Message
+            if ($AllowCliFallback -and
+                $_.Exception.GetType().FullName -eq 'Microsoft.WinGet.Client.Engine.Exceptions.WinGetIntegrityException' -and
+                [string]$_.Exception.Category -eq 'AppInstallerNotInstalled') {
+                Write-Host "  App Installer is unavailable to the WinGet module ($moduleError). Checking the built-in winget command..." -ForegroundColor Yellow
+                break
+            }
             # 0x800706BA means the module could not reach WinGet's RPC server.
             if ($_.Exception.HResult -ne -2147023174) { throw }
-            $moduleError = $_.Exception.Message
         }
 
         if ($attempt -eq 1) {
@@ -440,6 +448,35 @@ function Test-DevConfigWingetPackageInstalled {
     return -not $pkg.IsUpdateAvailable
 }
 
+function Get-DevConfigWingetPackageState {
+    param(
+        [Parameter(Mandatory)] [string] $Id
+    )
+    if ($Script:DevConfigWinGetMode -eq 'Cli') {
+        $listed = Invoke-DevConfigWingetSourceOperation -Name "winget list $Id" -ScriptBlock {
+            $result = Invoke-DevConfigWingetCli -Arguments @('list', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements')
+            if ($result.ExitCode -ne 0 -and $result.ExitCode -ne $Script:DevConfigWingetNotFound) {
+                throw [Runtime.InteropServices.COMException]::new("winget list $Id failed with exit code $($result.ExitCode)", $result.ExitCode)
+            }
+            return $result
+        }
+        if ($listed.ExitCode -eq $Script:DevConfigWingetNotFound) {
+            return [pscustomobject]@{ State = 'Absent'; Package = $null }
+        }
+        $state = if (Test-DevConfigWingetUpgradeAvailable -Id $Id) { 'UpgradeAvailable' } else { 'Current' }
+        return [pscustomobject]@{ State = $state; Package = $null }
+    }
+
+    $pkg = Invoke-DevConfigWingetSourceOperation -Name "WinGet package query $Id" -ScriptBlock {
+        Get-WinGetPackage -Id $Id -Source winget -MatchOption EqualsCaseInsensitive -ErrorAction Stop
+    }
+    if (-not $pkg) {
+        return [pscustomobject]@{ State = 'Absent'; Package = $null }
+    }
+    $state = if ($pkg.IsUpdateAvailable) { 'UpgradeAvailable' } else { 'Current' }
+    return [pscustomobject]@{ State = $state; Package = $pkg }
+}
+
 # winget list exits 0 whether or not an upgrade exists, and every message it prints is localized.
 # The package id is the one token in that output that is never translated, so it is what gets matched.
 function Test-DevConfigWingetUpgradeAvailable {
@@ -460,25 +497,133 @@ function Test-DevConfigWingetUpgradeAvailable {
     return @($upgrade.Output -split '\r?\n' | Where-Object { $_ -match ('(^|\s)' + [regex]::Escape($Id) + '(\s|$)') }).Count -gt 0
 }
 
+function Get-DevConfigWingetInstallArguments {
+    param(
+        [Parameter(Mandatory)] [string] $Id,
+        [switch] $DisableInteractivity
+    )
+    return @(
+        'install', '--id', $Id, '--exact', '--source', 'winget', '--silent',
+        '--accept-package-agreements', '--accept-source-agreements'
+        if ($DisableInteractivity) { '--disable-interactivity' }
+    )
+}
+
+function Get-DevConfigWingetUpgradeArguments {
+    param(
+        [Parameter(Mandatory)] [string] $Id,
+        [switch] $DisableInteractivity
+    )
+    return @(
+        'upgrade', '--id', $Id, '--exact', '--source', 'winget', '--silent',
+        '--accept-package-agreements', '--accept-source-agreements'
+        if ($DisableInteractivity) { '--disable-interactivity' }
+    )
+}
+
 function Install-DevConfigWingetPackage {
     param(
-        [Parameter(Mandatory)] [string] $Id
+        [Parameter(Mandatory)] [string] $Id,
+        [switch] $AllowCliFallback,
+        [switch] $DisableInteractivity
     )
     Invoke-DevConfigWingetSourceOperation -Name "winget install $Id" -RetryPackageFailure -ScriptBlock {
         if ($Script:DevConfigWinGetMode -eq 'Cli') {
-            $r = Invoke-DevConfigWingetCli -Arguments @('install', '--id', $Id, '--exact', '--source', 'winget', '--silent', '--accept-package-agreements', '--accept-source-agreements')
+            $r = Invoke-DevConfigWingetCli -Arguments (Get-DevConfigWingetInstallArguments -Id $Id -DisableInteractivity:$DisableInteractivity)
             if ($r.ExitCode -ne 0 -and $r.ExitCode -ne $Script:DevConfigWingetNoUpgrade) {
                 throw [Runtime.InteropServices.COMException]::new("winget install $Id failed with exit code $($r.ExitCode)", $r.ExitCode)
             }
             return
         }
 
-        $result = Install-WinGetPackage -Id $Id -Source winget -Mode Silent -MatchOption EqualsCaseInsensitive -ErrorAction Stop
-        # NoApplicableUpgrade means the package is already installed and current.
-        if (-not $result.Succeeded() -and $result.Status -ne 'NoApplicableUpgrade') {
-            throw [InvalidOperationException]::new("winget install $Id failed: $($result.ErrorMessage())", $result.ExtendedErrorCode)
+        try {
+            $result = Install-WinGetPackage -Id $Id -Source winget -Mode Silent -MatchOption EqualsCaseInsensitive -ErrorAction Stop
+            # NoApplicableUpgrade means the package is already installed and current.
+            if (-not $result.Succeeded() -and $result.Status -ne 'NoApplicableUpgrade') {
+                throw [InvalidOperationException]::new("winget install $Id failed: $($result.ErrorMessage())", $result.ExtendedErrorCode)
+            }
+            return
+        } catch {
+            $moduleError = $_.Exception.Message
+            if (-not $AllowCliFallback -or -not (Test-DevConfigWingetCliUsable)) {
+                throw
+            }
+            Write-Host "  WinGet module install failed; retrying with winget.exe ($moduleError)" -ForegroundColor Yellow
+            $r = Invoke-DevConfigWingetCli -Arguments (Get-DevConfigWingetInstallArguments -Id $Id -DisableInteractivity:$DisableInteractivity)
+            if ($r.ExitCode -ne 0 -and $r.ExitCode -ne $Script:DevConfigWingetNoUpgrade) {
+                throw [Runtime.InteropServices.COMException]::new("winget install $Id failed after module fallback (module: $moduleError; CLI exit: $($r.ExitCode))", $r.ExitCode)
+            }
+            $Script:DevConfigWinGetMode = 'Cli'
         }
     }
+}
+
+function Update-DevConfigWingetPackage {
+    param(
+        [Parameter(Mandatory)] [string] $Id,
+        [switch] $AllowCliFallback,
+        [switch] $DisableInteractivity
+    )
+    Invoke-DevConfigWingetSourceOperation -Name "winget upgrade $Id" -RetryPackageFailure -ScriptBlock {
+        if ($Script:DevConfigWinGetMode -eq 'Cli') {
+            $r = Invoke-DevConfigWingetCli -Arguments (Get-DevConfigWingetUpgradeArguments -Id $Id -DisableInteractivity:$DisableInteractivity)
+            if ($r.ExitCode -ne 0 -and $r.ExitCode -ne $Script:DevConfigWingetNoUpgrade) {
+                throw [Runtime.InteropServices.COMException]::new("winget upgrade $Id failed with exit code $($r.ExitCode)", $r.ExitCode)
+            }
+            return
+        }
+
+        try {
+            $result = Update-WinGetPackage -Id $Id -Source winget -Mode Silent -MatchOption EqualsCaseInsensitive -ErrorAction Stop
+            if (-not $result.Succeeded() -and $result.Status -ne 'NoApplicableUpgrade') {
+                throw [InvalidOperationException]::new("winget module upgrade $Id failed: $($result.ErrorMessage())", $result.ExtendedErrorCode)
+            }
+            return
+        } catch {
+            $moduleError = $_.Exception.Message
+            if (-not $AllowCliFallback -or -not (Test-DevConfigWingetCliUsable)) {
+                throw
+            }
+            Write-Host "  WinGet module upgrade failed; retrying with winget.exe ($moduleError)" -ForegroundColor Yellow
+            $r = Invoke-DevConfigWingetCli -Arguments (Get-DevConfigWingetUpgradeArguments -Id $Id -DisableInteractivity:$DisableInteractivity)
+            if ($r.ExitCode -ne 0 -and $r.ExitCode -ne $Script:DevConfigWingetNoUpgrade) {
+                throw [Runtime.InteropServices.COMException]::new("winget upgrade $Id failed after module fallback (module: $moduleError; CLI exit: $($r.ExitCode))", $r.ExitCode)
+            }
+            $Script:DevConfigWinGetMode = 'Cli'
+        }
+    }
+}
+
+function Ensure-DevConfigWingetPackage {
+    param(
+        [Parameter(Mandatory)] [string] $Id,
+        [switch] $AllowCliFallback,
+        [switch] $DisableInteractivity
+    )
+
+    $state = Get-DevConfigWingetPackageState -Id $Id
+    switch ($state.State) {
+        'Current' {
+            return 'already-current'
+        }
+        'UpgradeAvailable' {
+            Update-DevConfigWingetPackage -Id $Id -AllowCliFallback:$AllowCliFallback -DisableInteractivity:$DisableInteractivity
+            $action = 'upgraded'
+        }
+        'Absent' {
+            Install-DevConfigWingetPackage -Id $Id -AllowCliFallback:$AllowCliFallback -DisableInteractivity:$DisableInteractivity
+            $action = 'installed'
+        }
+        default {
+            throw "Unknown WinGet package state '$($state.State)' for '$Id'."
+        }
+    }
+
+    Wait-DevConfigWingetPackageSettled -Id $Id
+    if ((Get-DevConfigWingetPackageState -Id $Id).State -ne 'Current') {
+        throw "WinGet did not verify '$Id' as installed and current after $action."
+    }
+    return $action
 }
 
 # Get-WinGetPackage catalog reads can lag after install, so wait before checking the result.
