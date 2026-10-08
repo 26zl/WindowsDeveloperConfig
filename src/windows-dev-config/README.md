@@ -106,6 +106,7 @@ The same engine can apply one developer workload instead of the whole workstatio
 | Workload | Installs | One-liner |
 | --- | --- | --- |
 | `winui` | Developer Mode, PowerShell 7, .NET SDK 10, Windows App CLI, Visual Studio Community 2026 with the .NET desktop and WinUI application development workloads, and the WinUI `dotnet new` templates | `irm https://aka.ms/devconfig/winui/setup.ps1 \| iex` |
+| `winappcli` | Developer Mode, PowerShell 7, .NET SDK 10, and the Windows App Development CLI | `irm https://aka.ms/devconfig/winappcli/setup.ps1 \| iex` |
 | `dotnet` | Developer Mode, PowerShell 7, and .NET SDK 10 | `irm https://aka.ms/devconfig/dotnet/setup.ps1 \| iex` |
 | `php` | PowerShell 7 and the PHP runtime/CLI | `irm https://aka.ms/devconfig/php/setup.ps1 \| iex` |
 
