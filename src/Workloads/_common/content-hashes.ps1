@@ -11,7 +11,6 @@ $Script:DevConfigWorkloadContentHashes = @{
     'rocm\hip-smoke.cpp' = 'ece1ed905b3afc7ceb918cc3ff751d624b8d681444b1c507a74cfef3d326034d'
     'sql\configuration.winget' = '99472e573c10316a17be12d45da834e22be4b1b774afc5c15fdefe3d63bb98e7'
     'typescript\configuration.winget' = '826e1755d85798e376baa00a9891c58fd2dd6da67d0f54486ad957202ee7c8b1'
-    'winforms\configuration.winget' = '39de8aee958e1e4989fd5b484a45a36537a7f8cb72dc966fa3afa4d0e8b9e34f'
 }
 
 function Get-DevConfigCanonicalWorkloadHash {
