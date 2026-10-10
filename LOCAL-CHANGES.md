@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `0be0f2a`, 2026-10-09). Everything is upstream and
+kept in sync with upstream `main` (last merged: `af48162`, 2026-10-10). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -280,7 +280,8 @@ Still true after these fixes, and worth knowing before running anything else in 
   dash), #156 (release signature verification) and #157 (re-sign). On a `git archive` of `0be0f2a`
   (2026-10-09) every `.ps1` under the three roots is `Valid`: 32, 43 and 1. The drift checker now
   lists the `dotnet`/`php` workload files from #158/#162 as not yet mirrored, which is just the
-  next sign cycle.
+  next sign cycle. On `af48162` (2026-10-10, after #165/#172/#173/#174) everything is `Valid`
+  (39, 43 and 1) and the drift checker reports 101 `ok`, nothing drifted or missing.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
