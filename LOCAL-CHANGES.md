@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `af48162`, 2026-10-10). Everything is upstream and
+kept in sync with upstream `main` (last merged: `b39c868`, 2026-10-21). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
