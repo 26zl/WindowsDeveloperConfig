@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `b39c868`, 2026-10-21). Everything is upstream and
+kept in sync with upstream `main` (last merged: `fb56461`, 2026-10-31). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -120,7 +120,8 @@ winget configure --file .\windows-dev-config\dev-config-nordp.winget `
 Applied unmodified from an elevated PowerShell 7: `php`, `typescript`, `java`. Already
 satisfied before the run, so not applied: `dotnet`, `go`, `python`, `rust`. The Rust toolchain
 links against the VCTools workload in VS Build Tools 2026; upstream's `rust` config would add
-VS 2022 Build Tools on top. Skipped by choice: `winforms`, `winui`.
+VS 2022 Build Tools on top. Skipped by choice: `winforms`, `winui`. Upstream removed the `php`
+workload in #182 (2026-10-21); what it installed here on 2026-09-14 stays.
 
 The Java MSI prepends JDK 25 to the machine `PATH`, repoints `JAVA_HOME` from Temurin 21 to
 JDK 25, and takes over the `.jar` association.
@@ -217,7 +218,7 @@ version); the SKILL.md/cmdpal, SUPPORT.md and `wsl-comfort-shell` rows are draft
 
 | File | Change |
 | --- | --- |
-| `src/Workloads/powershell/configuration.winget` | `Read-VSCodeSettings` no longer strips comments with a regex before `ConvertFrom-Json`. The block-comment pattern matched from `/**"` in one glob key to `"**/` in the next and deleted everything in between: `"**/.venv/**": true, "**/node_modules/**": true` became `"**/.venvnode_modules/**": true`. pwsh 7 parses JSONC comments and trailing commas natively. The unit still rewrites `settings.json` through `ConvertTo-Json`, so `configuration-local.winget` keeps it removed. Open upstream as #118, where a file holding only comments (which parses to `$null`) is also mapped back to an empty table; the fork's copy does not have that extra guard yet. |
+| `src/Workloads/powershell/configuration.winget` | `Read-VSCodeSettings` no longer strips comments with a regex before `ConvertFrom-Json`. The block-comment pattern matched from `/**"` in one glob key to `"**/` in the next and deleted everything in between: `"**/.venv/**": true, "**/node_modules/**": true` became `"**/.venvnode_modules/**": true`. pwsh 7 parses JSONC comments and trailing commas natively. The unit still rewrites `settings.json` through `ConvertTo-Json`, so `configuration-local.winget` keeps it removed. Open upstream as #118, where a file holding only comments (which parses to `$null`) is also mapped back to an empty table; the fork's copy does not have that extra guard yet. Upstream's open #176 (2026-10-12) deletes `configuration.winget` and ports the workload to `setup.ps1`, which would make #118 moot. |
 | `src/manifest.yml` | The `winforms` build wrote to `tests/winforms/bin` while `run` executed `src\tests\winforms\bin\hello.exe`. Both now use `src/tests/winforms/bin`. Merged upstream as #119. |
 | `.github/skills/dsc-resource-authoring/SKILL.md` | Removed references to a non-existent `AGENTS.md`. Paths updated from the old `scripts/windows/<id>/` layout to `src/Workloads/<id>/` and `src/manifest.yml`. Draft 04. |
 | `SUPPORT.md` | Replaced the untouched Microsoft template placeholders with the actual issue-reporting instructions. Draft 11. |
@@ -281,7 +282,12 @@ Still true after these fixes, and worth knowing before running anything else in 
   (2026-10-09) every `.ps1` under the three roots is `Valid`: 32, 43 and 1. The drift checker now
   lists the `dotnet`/`php` workload files from #158/#162 as not yet mirrored, which is just the
   next sign cycle. On `af48162` (2026-10-10, after #165/#172/#173/#174) everything is `Valid`
-  (39, 43 and 1) and the drift checker reports 101 `ok`, nothing drifted or missing.
+  (39, 43 and 1) and the drift checker reports 101 `ok`, nothing drifted or missing. On `fb56461`
+  (2026-10-31 check, after #175 and #182) every `.ps1` is still `Valid` (38, 42 and 1; #182 removed
+  the `php` workload and its signed copies), but the drift checker reports 97 `ok`, 2 drifted and
+  2 missing: the signed `steps\packages.ps1` still carries the `Php` catalog entry #182 removed from
+  `src/`, and #175 added `src\wsl-comfort\setup.ps1` and `content-hashes.psd1` and rewrote
+  `readme.md` without a sign run. Again just the next sign cycle.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
