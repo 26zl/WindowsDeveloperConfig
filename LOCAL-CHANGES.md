@@ -1,7 +1,7 @@
 # Local changes
 
 This is a fork of [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig),
-kept in sync with upstream `main` (last merged: `fb56461`, 2026-10-31). Everything is upstream and
+kept in sync with upstream `main` (last merged: `e4921dd`, 2026-11-12). Everything is upstream and
 unmodified **except** the files described below and the review fixes listed at the end.
 
 ## Windows Dev Config without Remote Desktop
@@ -121,7 +121,8 @@ Applied unmodified from an elevated PowerShell 7: `php`, `typescript`, `java`. A
 satisfied before the run, so not applied: `dotnet`, `go`, `python`, `rust`. The Rust toolchain
 links against the VCTools workload in VS Build Tools 2026; upstream's `rust` config would add
 VS 2022 Build Tools on top. Skipped by choice: `winforms`, `winui`. Upstream removed the `php`
-workload in #182 (2026-10-21); what it installed here on 2026-09-14 stays.
+workload in #182 (2026-10-21) and restored it in #188 (2026-11-02); what it installed here on
+2026-09-14 stayed throughout.
 
 The Java MSI prepends JDK 25 to the machine `PATH`, repoints `JAVA_HOME` from Temurin 21 to
 JDK 25, and takes over the `.jar` association.
@@ -287,7 +288,11 @@ Still true after these fixes, and worth knowing before running anything else in 
   the `php` workload and its signed copies), but the drift checker reports 97 `ok`, 2 drifted and
   2 missing: the signed `steps\packages.ps1` still carries the `Php` catalog entry #182 removed from
   `src/`, and #175 added `src\wsl-comfort\setup.ps1` and `content-hashes.psd1` and rewrote
-  `readme.md` without a sign run. Again just the next sign cycle.
+  `readme.md` without a sign run. Again just the next sign cycle. On `e4921dd` (2026-11-12 check,
+  after #188, which restored `php`, and #189, #190 and #191, which added and pinned the signed
+  `wsl-comfort\setup.ps1` and `content-hashes.psd1`) every `.ps1` is `Valid` in pwsh 7.7.0 and
+  Windows PowerShell 5.1 (39, 43 and 2) and the drift checker reports 103 `ok`, nothing drifted
+  or missing.
 - `Workloads\powershell\install.ps1` and `Workloads\sql\install.ps1` hard-code
   `configuration.winget`. The `configuration-local.winget` variants are only used when passed to
   `winget configure` by hand.
